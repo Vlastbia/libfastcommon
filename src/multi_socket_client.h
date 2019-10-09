@@ -22,9 +22,9 @@
 #include "ioevent.h"
 
 typedef enum {
-    fast_multi_sock_stage_send = 'S',
-    fast_multi_sock_stage_recv = 'R'
-} FastMultiSockStage;
+    fast_multi_sock_stage_recv_header = 'H',
+    fast_multi_sock_stage_recv_body = 'B'
+} FastMultiSockRecvStage;
 
 struct fast_multi_sock_client;
 struct fast_multi_sock_entry;
@@ -40,9 +40,10 @@ typedef struct fast_multi_sock_entry {
     ConnectionInfo *conn;     //the socket must be non-block socket
     FastBuffer *send_buffer;  //send buffer for internal use
     fast_multi_sock_client_io_func io_callback;  //for internal use
-    FastBuffer recv_buffer;   //recv buffer
+    FastBuffer recv_buffer;   //recv buffer for response package
     int error_no;             //0 for success, != 0 fail
     int remain;               //remain bytes, for internal use
+    FastMultiSockRecvStage recv_stage;  //for internal use
     bool done;                //for internal use
 } FastMultiSockEntry;
 
