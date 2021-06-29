@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #include <netdb.h>
 #include <unistd.h>
@@ -15,11 +22,16 @@
 #include "sched_thread.h"
 #include "connection_pool.h"
 
-int conn_pool_init_ex(ConnectionPool *cp, int connect_timeout, \
+int conn_pool_init_ex1(ConnectionPool *cp, int connect_timeout,
 	const int max_count_per_entry, const int max_idle_time,
-    const int socket_domain)
+    const int socket_domain, const int htable_init_capacity,
+    fc_connection_callback_func connect_done_func, void *connect_done_args,
+    fc_connection_callback_func validate_func, void *validate_args,
+    const int extra_data_size)
 {
+    const int64_t alloc_elements_limit = 0;
 	int result;
+    int init_capacity;
 
 	if ((result=init_pthread_lock(&cp->lock)) != 0)
 	{
@@ -29,22 +41,37 @@ int conn_pool_init_ex(ConnectionPool *cp, int connect_timeout, \
 	cp->max_count_per_entry = max_count_per_entry;
 	cp->max_idle_time = max_idle_time;
 	cp->socket_domain = socket_domain;
+    cp->connect_done_callback.func = connect_done_func;
+    cp->connect_done_callback.args = connect_done_args;
+    cp->validate_callback.func = validate_func;
+    cp->validate_callback.args = validate_args;
 
-	return hash_init(&(cp->hash_array), simple_hash, 1024, 0.75);
+    init_capacity = htable_init_capacity > 0 ? htable_init_capacity : 256;
+    if ((result=fast_mblock_init_ex1(&cp->manager_allocator, "cpool_manager",
+                    sizeof(ConnectionManager), init_capacity,
+                    alloc_elements_limit, NULL, NULL, false)) != 0)
+    {
+        return result;
+    }
+
+    if ((result=fast_mblock_init_ex1(&cp->node_allocator, "cpool_node",
+                    sizeof(ConnectionNode) + sizeof(ConnectionInfo) +
+                    extra_data_size, init_capacity, alloc_elements_limit,
+                    NULL, NULL, true)) != 0)
+    {
+        return result;
+    }
+
+	return hash_init(&(cp->hash_array), simple_hash, init_capacity, 0.75);
 }
 
-int conn_pool_init(ConnectionPool *cp, int connect_timeout,
-	const int max_count_per_entry, const int max_idle_time)
+static int coon_pool_close_connections(const int index,
+        const HashData *data, void *args)
 {
-    const int socket_domain = AF_INET;
-    return conn_pool_init_ex(cp, connect_timeout, max_count_per_entry,
-            max_idle_time, socket_domain);
-}
-
-int coon_pool_close_connections(const int index, const HashData *data, void *args)
-{
+    ConnectionPool *cp;
     ConnectionManager *cm;
 
+    cp = (ConnectionPool *)args;
     cm = (ConnectionManager *)data->value;
     if (cm != NULL)
     {
@@ -58,9 +85,10 @@ int coon_pool_close_connections(const int index, const HashData *data, void *arg
             node = node->next;
 
             conn_pool_disconnect_server(deleted->conn);
-            free(deleted);
+            fast_mblock_free_object(&cp->node_allocator, deleted);
         }
-        free(cm);
+
+        fast_mblock_free_object(&cp->manager_allocator, cm);
     }
 
     return 0;
@@ -69,7 +97,7 @@ int coon_pool_close_connections(const int index, const HashData *data, void *arg
 void conn_pool_destroy(ConnectionPool *cp)
 {
 	pthread_mutex_lock(&cp->lock);
-    hash_walk(&(cp->hash_array), coon_pool_close_connections, NULL);
+    hash_walk(&(cp->hash_array), coon_pool_close_connections, cp);
 	hash_destroy(&(cp->hash_array));
 	pthread_mutex_unlock(&cp->lock);
 
@@ -85,75 +113,76 @@ void conn_pool_disconnect_server(ConnectionInfo *pConnection)
 	}
 }
 
-int conn_pool_connect_server_ex(ConnectionInfo *pConnection,
+int conn_pool_connect_server_ex(ConnectionInfo *conn,
 		const int connect_timeout, const char *bind_ipaddr,
         const bool log_connect_error)
 {
 	int result;
-    int domain;
 
-	if (pConnection->sock >= 0)
+	if (conn->sock >= 0)
 	{
-		close(pConnection->sock);
+		close(conn->sock);
 	}
 
-    if (pConnection->socket_domain == AF_INET ||
-            pConnection->socket_domain == AF_INET6)
+    if ((conn->sock=socketCreateEx2(conn->socket_domain, conn->ip_addr,
+                    O_NONBLOCK, bind_ipaddr, &result)) < 0)
     {
-        domain = pConnection->socket_domain;
-    }
-    else
-    {
-        domain = is_ipv6_addr(pConnection->ip_addr) ? AF_INET6 : AF_INET;
-    }
-	pConnection->sock = socket(domain, SOCK_STREAM, 0);
-	if(pConnection->sock < 0)
-	{
-		logError("file: "__FILE__", line: %d, "
-			"socket create fail, errno: %d, "
-			"error info: %s", __LINE__, errno, STRERROR(errno));
-		return errno != 0 ? errno : EPERM;
-	}
-
-    if (bind_ipaddr != NULL && *bind_ipaddr != '\0')
-    {
-        if ((result=socketBind2(domain, pConnection->sock, bind_ipaddr, 0)) != 0)
-        {
-            return result;
-        }
+        return result;
     }
 
-    SET_SOCKOPT_NOSIGPIPE(pConnection->sock);
-	if ((result=tcpsetnonblockopt(pConnection->sock)) != 0)
-	{
-		close(pConnection->sock);
-		pConnection->sock = -1;
-		return result;
-	}
-
-	if ((result=connectserverbyip_nb(pConnection->sock,
-		pConnection->ip_addr, pConnection->port,
-		connect_timeout)) != 0)
+	if ((result=connectserverbyip_nb(conn->sock, conn->ip_addr,
+                    conn->port, connect_timeout)) != 0)
 	{
         if (log_connect_error)
         {
             logError("file: "__FILE__", line: %d, "
-                    "connect to server %s:%d fail, errno: %d, "
-                    "error info: %s", __LINE__, pConnection->ip_addr,
-                    pConnection->port, result, STRERROR(result));
+                    "connect to server %s:%u fail, errno: %d, "
+                    "error info: %s", __LINE__, conn->ip_addr,
+                    conn->port, result, STRERROR(result));
         }
 
-		close(pConnection->sock);
-		pConnection->sock = -1;
+		close(conn->sock);
+		conn->sock = -1;
 		return result;
 	}
 
 	return 0;
 }
 
+int conn_pool_async_connect_server_ex(ConnectionInfo *conn,
+        const char *bind_ipaddr)
+{
+    int result;
+
+    if (conn->sock >= 0)
+    {
+        close(conn->sock);
+    }
+
+    if ((conn->sock=socketCreateEx2(conn->socket_domain,
+                    conn->ip_addr, O_NONBLOCK, bind_ipaddr,
+                    &result)) < 0)
+    {
+        return result;
+    }
+
+    result = asyncconnectserverbyip(conn->sock, conn->ip_addr, conn->port);
+    if (!(result == 0 || result == EINPROGRESS))
+    {
+        logError("file: "__FILE__", line: %d, "
+                "connect to server %s:%u fail, errno: %d, "
+                "error info: %s", __LINE__, conn->ip_addr,
+                conn->port, result, STRERROR(result));
+        close(conn->sock);
+        conn->sock = -1;
+    }
+
+    return result;
+}
+
 static inline void  conn_pool_get_key(const ConnectionInfo *conn, char *key, int *key_len)
 {
-    *key_len = sprintf(key, "%s_%d", conn->ip_addr, conn->port);
+    *key_len = sprintf(key, "%s_%u", conn->ip_addr, conn->port);
 }
 
 ConnectionInfo *conn_pool_get_connection(ConnectionPool *cp, 
@@ -161,8 +190,6 @@ ConnectionInfo *conn_pool_get_connection(ConnectionPool *cp,
 {
 	char key[INET6_ADDRSTRLEN + 8];
 	int key_len;
-	int bytes;
-	char *p;
 	ConnectionManager *cm;
 	ConnectionNode *node;
 	ConnectionInfo *ci;
@@ -174,15 +201,14 @@ ConnectionInfo *conn_pool_get_connection(ConnectionPool *cp,
 	cm = (ConnectionManager *)hash_find(&cp->hash_array, key, key_len);
 	if (cm == NULL)
 	{
-		cm = (ConnectionManager *)malloc(sizeof(ConnectionManager));
+		cm = (ConnectionManager *)fast_mblock_alloc_object(
+                &cp->manager_allocator);
 		if (cm == NULL)
 		{
-			*err_no = errno != 0 ? errno : ENOMEM;
-			logError("file: "__FILE__", line: %d, " \
-				"malloc %d bytes fail, errno: %d, " \
-				"error info: %s", __LINE__, \
-				(int)sizeof(ConnectionManager), \
-				*err_no, STRERROR(*err_no));
+			*err_no = ENOMEM;
+			logError("file: "__FILE__", line: %d, "
+				"malloc %d bytes fail", __LINE__,
+				(int)sizeof(ConnectionManager));
 			pthread_mutex_unlock(&cp->lock);
 			return NULL;
 		}
@@ -210,7 +236,7 @@ ConnectionInfo *conn_pool_get_connection(ConnectionPool *cp,
 			{
 				*err_no = ENOSPC;
 				logError("file: "__FILE__", line: %d, " \
-					"connections: %d of server %s:%d " \
+					"connections: %d of server %s:%u " \
 					"exceed limit: %d", __LINE__, \
 					cm->total_count, conn->ip_addr, \
 					conn->port, cp->max_count_per_entry);
@@ -218,21 +244,19 @@ ConnectionInfo *conn_pool_get_connection(ConnectionPool *cp,
 				return NULL;
 			}
 
-			bytes = sizeof(ConnectionNode) + sizeof(ConnectionInfo);
-			p = (char *)malloc(bytes);
-			if (p == NULL)
-			{
-				*err_no = errno != 0 ? errno : ENOMEM;
-				logError("file: "__FILE__", line: %d, " \
-					"malloc %d bytes fail, errno: %d, " \
-					"error info: %s", __LINE__, \
-					bytes, *err_no, STRERROR(*err_no));
-				pthread_mutex_unlock(&cm->lock);
-				return NULL;
-			}
+            node = (ConnectionNode *)fast_mblock_alloc_object(
+                    &cp->node_allocator);
+			if (node == NULL)
+            {
+                *err_no = ENOMEM;
+                logError("file: "__FILE__", line: %d, "
+                        "malloc %d bytes fail", __LINE__, (int)
+                        (sizeof(ConnectionNode) + sizeof(ConnectionInfo)));
+                pthread_mutex_unlock(&cm->lock);
+                return NULL;
+            }
 
-			node = (ConnectionNode *)p;
-			node->conn = (ConnectionInfo *)(p + sizeof(ConnectionNode));
+			node->conn = (ConnectionInfo *)(node + 1);
 			node->manager = cm;
 			node->next = NULL;
 			node->atime = 0;
@@ -243,20 +267,31 @@ ConnectionInfo *conn_pool_get_connection(ConnectionPool *cp,
 			memcpy(node->conn, conn, sizeof(ConnectionInfo));
             node->conn->socket_domain = cp->socket_domain;
 			node->conn->sock = -1;
-			*err_no = conn_pool_connect_server(node->conn, \
+            node->conn->validate_flag = false;
+			*err_no = conn_pool_connect_server(node->conn,
 					cp->connect_timeout);
+            if (*err_no == 0 && cp->connect_done_callback.func != NULL)
+            {
+                *err_no = cp->connect_done_callback.func(node->conn,
+                        cp->connect_done_callback.args);
+            }
 			if (*err_no != 0)
 			{
+                if (node->conn->sock >= 0)
+                {
+                    close(node->conn->sock);
+                    node->conn->sock = -1;
+                }
                 pthread_mutex_lock(&cm->lock);
                 cm->total_count--;  //rollback
+                fast_mblock_free_object(&cp->node_allocator, node);
                 pthread_mutex_unlock(&cm->lock);
 
-				free(p);
 				return NULL;
 			}
 
 			logDebug("file: "__FILE__", line: %d, " \
-				"server %s:%d, new connection: %d, " \
+				"server %s:%u, new connection: %d, " \
 				"total_count: %d, free_count: %d",   \
 				__LINE__, conn->ip_addr, conn->port, \
 				node->conn->sock, cm->total_count, \
@@ -265,17 +300,46 @@ ConnectionInfo *conn_pool_get_connection(ConnectionPool *cp,
 		}
 		else
 		{
+            bool invalid;
+
 			node = cm->head;
 			ci = node->conn;
 			cm->head = node->next;
 			cm->free_count--;
 
 			if (current_time - node->atime > cp->max_idle_time)
-			{
+            {
+                if (cp->validate_callback.func != NULL)
+                {
+                    ci->validate_flag = true;
+                }
+                invalid = true;
+            }
+            else
+            {
+                invalid = false;
+            }
+
+            if (ci->validate_flag)
+            {
+                ci->validate_flag = false;
+                if (cp->validate_callback.func != NULL)
+                {
+                    invalid = cp->validate_callback.func(ci,
+                            cp->validate_callback.args) != 0;
+                }
+                else
+                {
+                    invalid = false;
+                }
+            }
+
+            if (invalid)
+            {
 				cm->total_count--;
 
 				logDebug("file: "__FILE__", line: %d, " \
-					"server %s:%d, connection: %d idle " \
+					"server %s:%u, connection: %d idle " \
 					"time: %d exceeds max idle time: %d, "\
 					"total_count: %d, free_count: %d", \
 					__LINE__, conn->ip_addr, conn->port, \
@@ -285,13 +349,13 @@ ConnectionInfo *conn_pool_get_connection(ConnectionPool *cp,
 					cm->free_count);
 
 				conn_pool_disconnect_server(ci);
-				free(node);
+                fast_mblock_free_object(&cp->node_allocator, node);
 				continue;
 			}
 
 			pthread_mutex_unlock(&cm->lock);
 			logDebug("file: "__FILE__", line: %d, " \
-				"server %s:%d, reuse connection: %d, " \
+				"server %s:%u, reuse connection: %d, " \
 				"total_count: %d, free_count: %d", 
 				__LINE__, conn->ip_addr, conn->port, 
 				ci->sock, cm->total_count, cm->free_count);
@@ -317,7 +381,7 @@ int conn_pool_close_connection_ex(ConnectionPool *cp, ConnectionInfo *conn,
 	if (cm == NULL)
 	{
 		logError("file: "__FILE__", line: %d, " \
-			"hash entry of server %s:%d not exist", __LINE__, \
+			"hash entry of server %s:%u not exist", __LINE__, \
 			conn->ip_addr, conn->port);
 		return ENOENT;
 	}
@@ -326,25 +390,32 @@ int conn_pool_close_connection_ex(ConnectionPool *cp, ConnectionInfo *conn,
 	if (node->manager != cm)
 	{
 		logError("file: "__FILE__", line: %d, " \
-			"manager of server entry %s:%d is invalid!", \
+			"manager of server entry %s:%u is invalid!", \
 			__LINE__, conn->ip_addr, conn->port);
 		return EINVAL;
 	}
 
 	pthread_mutex_lock(&cm->lock);
 	if (bForce)
-	{
-		cm->total_count--;
+    {
+        cm->total_count--;
 
-		logDebug("file: "__FILE__", line: %d, " \
-			"server %s:%d, release connection: %d, " \
-			"total_count: %d, free_count: %d", 
-			__LINE__, conn->ip_addr, conn->port, 
-			conn->sock, cm->total_count, cm->free_count);
+        logDebug("file: "__FILE__", line: %d, "
+                "server %s:%u, release connection: %d, "
+                "total_count: %d, free_count: %d",
+                __LINE__, conn->ip_addr, conn->port,
+                conn->sock, cm->total_count, cm->free_count);
 
-		conn_pool_disconnect_server(conn);
-		free(node);
-	}
+        conn_pool_disconnect_server(conn);
+        fast_mblock_free_object(&cp->node_allocator, node);
+
+        node = cm->head;
+        while (node != NULL)
+        {
+            node->conn->validate_flag = true;
+            node = node->next;
+        }
+    }
 	else
 	{
 		node->atime = get_current_time();
@@ -353,7 +424,7 @@ int conn_pool_close_connection_ex(ConnectionPool *cp, ConnectionInfo *conn,
 		cm->free_count++;
 
 		logDebug("file: "__FILE__", line: %d, " \
-			"server %s:%d, free connection: %d, " \
+			"server %s:%u, free connection: %d, " \
 			"total_count: %d, free_count: %d", 
 			__LINE__, conn->ip_addr, conn->port, 
 			conn->sock, cm->total_count, cm->free_count);
@@ -400,13 +471,13 @@ int conn_pool_parse_server_info(const char *pServerStr,
     len = strlen(pServerStr);
     if (len == 0) {
         logError("file: "__FILE__", line: %d, "
-            "pServerStr \"%s\" is empty!",
+            "host \"%s\" is empty!",
             __LINE__, pServerStr);
         return EINVAL;
     }
     if (len >= sizeof(server_info)) {
         logError("file: "__FILE__", line: %d, "
-            "pServerStr \"%s\" is too long!",
+            "host \"%s\" is too long!",
             __LINE__, pServerStr);
         return ENAMETOOLONG;
     }
@@ -423,7 +494,7 @@ int conn_pool_parse_server_info(const char *pServerStr,
         pServerInfo->port = (int)strtol(parts[1], &endptr, 10);
         if ((endptr != NULL && *endptr != '\0') || pServerInfo->port <= 0) {
             logError("file: "__FILE__", line: %d, "
-                "pServerStr: %s, invalid port: %s!",
+                "host: %s, invalid port: %s!",
                 __LINE__, pServerStr, parts[1]);
             return EINVAL;
         }
@@ -433,7 +504,7 @@ int conn_pool_parse_server_info(const char *pServerStr,
         sizeof(pServerInfo->ip_addr)) == INADDR_NONE)
     {
         logError("file: "__FILE__", line: %d, "
-            "pServerStr: %s, invalid hostname: %s!",
+            "host: %s, invalid hostname: %s!",
             __LINE__, pServerStr, parts[0]);
         return EINVAL;
     }

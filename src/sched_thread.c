@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -13,9 +20,10 @@
 #include "shared_func.h"
 #include "pthread_func.h"
 #include "logger.h"
+#include "fc_memory.h"
 #include "sched_thread.h"
 
-volatile bool g_schedule_flag = false;
+volatile int g_schedule_flag = false;
 volatile time_t g_current_time = 0;
 
 static ScheduleArray waiting_schedule_array = {NULL, 0};
@@ -33,36 +41,37 @@ static int sched_dup_array(const ScheduleArray *pSrcArray,
 
 static int sched_cmp_by_next_call_time(const void *p1, const void *p2)
 {
-	return ((ScheduleEntry *)p1)->next_call_time - \
+	return ((ScheduleEntry *)p1)->next_call_time -
 			((ScheduleEntry *)p2)->next_call_time;
 }
 
-static int sched_init_entries(ScheduleArray *pScheduleArray)
+static int sched_init_entries(ScheduleEntry *entries, const int count)
 {
 	ScheduleEntry *pEntry;
 	ScheduleEntry *pEnd;
 	time_t time_base;
 	struct tm tm_current;
 	struct tm tm_base;
+    time_t current_time;
     int remain;
     int interval;
 
-	if (pScheduleArray->count < 0)
+	if (count < 0)
 	{
 		logError("file: "__FILE__", line: %d, " \
 			"schedule count %d < 0",  \
-			__LINE__, pScheduleArray->count);
+			__LINE__, count);
 		return EINVAL;
 	}
-	if (pScheduleArray->count == 0)
+	if (count == 0)
 	{
 		return 0;
 	}
 
-	g_current_time = time(NULL);
-	localtime_r((time_t *)&g_current_time, &tm_current);
-	pEnd = pScheduleArray->entries + pScheduleArray->count;
-	for (pEntry=pScheduleArray->entries; pEntry<pEnd; pEntry++)
+	current_time = time(NULL);
+	localtime_r((time_t *)&current_time, &tm_current);
+	pEnd = entries + count;
+	for (pEntry=entries; pEntry<pEnd; pEntry++)
 	{
         if (next_id < pEntry->id)
         {
@@ -79,20 +88,20 @@ static int sched_init_entries(ScheduleArray *pScheduleArray)
 
 		if (pEntry->time_base.hour == TIME_NONE)
 		{
-			pEntry->next_call_time = g_current_time + \
+			pEntry->next_call_time = current_time +
 						pEntry->interval;
 		}
 		else
 		{
-			if (tm_current.tm_hour > pEntry->time_base.hour || \
-				(tm_current.tm_hour == pEntry->time_base.hour \
+			if (tm_current.tm_hour > pEntry->time_base.hour ||
+				(tm_current.tm_hour == pEntry->time_base.hour
 				&& tm_current.tm_min >= pEntry->time_base.minute))
-			{
-				memcpy(&tm_base, &tm_current, sizeof(struct tm));
-			}
+            {
+                tm_base = tm_current;
+            }
 			else
 			{
-				time_base = g_current_time - 24 * 3600;
+				time_base = current_time - 24 * 3600;
 				localtime_r(&time_base, &tm_base);
 			}
 
@@ -107,7 +116,7 @@ static int sched_init_entries(ScheduleArray *pScheduleArray)
                 tm_base.tm_sec = 0;
             }
 			time_base = mktime(&tm_base);
-            remain = g_current_time - time_base;
+            remain = current_time - time_base;
             if (remain > 0)
             {
                 interval = pEntry->interval - remain % pEntry->interval;
@@ -121,20 +130,20 @@ static int sched_init_entries(ScheduleArray *pScheduleArray)
                 interval = 0;
             }
 
-			pEntry->next_call_time = g_current_time + interval;
+			pEntry->next_call_time = current_time + interval;
 		}
 
-		/*
+        /*
 		{
 			char buff1[32];
 			char buff2[32];
-			logInfo("id=%d, current time=%s, first call time=%s\n", \
-				pEntry->id, formatDatetime(g_current_time, \
-				"%Y-%m-%d %H:%M:%S", buff1, sizeof(buff1)), \
-				formatDatetime(pEntry->next_call_time, \
+			logInfo("id=%d, current time=%s, first call time=%s",
+				pEntry->id, formatDatetime(current_time,
+				"%Y-%m-%d %H:%M:%S", buff1, sizeof(buff1)),
+				formatDatetime(pEntry->next_call_time,
 				"%Y-%m-%d %H:%M:%S", buff2, sizeof(buff2)));
 		}
-		*/
+        */
 	}
 
 	return 0;
@@ -153,7 +162,7 @@ static void sched_make_chain(ScheduleContext *pContext)
 		return;
 	}
 
-	qsort(pScheduleArray->entries, pScheduleArray->count, \
+	qsort(pScheduleArray->entries, pScheduleArray->count,
 		sizeof(ScheduleEntry), sched_cmp_by_next_call_time);
 
 	pContext->head = pScheduleArray->entries;
@@ -210,10 +219,11 @@ static int print_all_sched_entries(ScheduleArray *pScheduleArray)
                 pEntry->time_base.minute, pEntry->time_base.second);
         }
         logInfo("id: %u, time_base: %s, interval: %d, "
-                "new_thread: %s, task_func: %p, args: %p",
-                pEntry->id, timebase, pEntry->interval,
-                pEntry->new_thread ? "true" : "false",
-                pEntry->task_func, pEntry->func_args);
+                "new_thread: %s, task_func: %p, args: %p, "
+                "next_call_time: %d", pEntry->id, timebase,
+                pEntry->interval, pEntry->new_thread ? "true" : "false",
+                pEntry->task_func, pEntry->func_args,
+                (int)pEntry->next_call_time);
     }
 
     free(sortedByIdArray.entries);
@@ -223,6 +233,7 @@ static int print_all_sched_entries(ScheduleArray *pScheduleArray)
 static int do_check_waiting(ScheduleContext *pContext)
 {
 	ScheduleArray *pScheduleArray;
+	ScheduleEntry *waitingEntries;
 	ScheduleEntry *newEntries;
 	ScheduleEntry *pWaitingEntry;
 	ScheduleEntry *pWaitingEnd;
@@ -230,8 +241,8 @@ static int do_check_waiting(ScheduleContext *pContext)
 	ScheduleEntry *pSchedEnd;
 	int allocCount;
 	int newCount;
-	int result;
 	int deleteCount;
+    int waitingCount;
 
 	pScheduleArray = &(pContext->scheduleArray);
 	deleteCount = 0;
@@ -269,7 +280,17 @@ static int do_check_waiting(ScheduleContext *pContext)
 		waiting_del_id = -1;
 	}
 
-	if (waiting_schedule_array.count == 0)
+    PTHREAD_MUTEX_LOCK(&schedule_context->lock);
+    waitingCount = waiting_schedule_array.count;
+    waitingEntries = waiting_schedule_array.entries;
+    if (waiting_schedule_array.entries != NULL)
+    {
+        waiting_schedule_array.count = 0;
+        waiting_schedule_array.entries = NULL;
+    }
+    PTHREAD_MUTEX_UNLOCK(&schedule_context->lock);
+
+	if (waitingCount == 0)
 	{
 		if (deleteCount > 0)
 		{
@@ -280,50 +301,41 @@ static int do_check_waiting(ScheduleContext *pContext)
 		return ENOENT;
 	}
 
-	allocCount = pScheduleArray->count + waiting_schedule_array.count;
-	newEntries = (ScheduleEntry *)malloc(sizeof(ScheduleEntry) * allocCount);
+	allocCount = pScheduleArray->count + waitingCount;
+	newEntries = (ScheduleEntry *)fc_malloc(sizeof(ScheduleEntry) * allocCount);
 	if (newEntries == NULL)
 	{
-		result = errno != 0 ? errno : ENOMEM;
-		logError("file: "__FILE__", line: %d, " \
-			"malloc %d bytes failed, " \
-			"errno: %d, error info: %s", \
-			__LINE__, (int)sizeof(ScheduleEntry) * allocCount, \
-			result, STRERROR(result));
-
 		if (deleteCount > 0)
 		{
 			sched_make_chain(pContext);
 		}
-		return result;
+		return ENOMEM;
 	}
 
 	if (pScheduleArray->count > 0)
 	{
-		memcpy(newEntries, pScheduleArray->entries, \
+		memcpy(newEntries, pScheduleArray->entries,
 			sizeof(ScheduleEntry) * pScheduleArray->count);
 	}
 	newCount = pScheduleArray->count;
-	pWaitingEnd = waiting_schedule_array.entries + waiting_schedule_array.count;
-	for (pWaitingEntry=waiting_schedule_array.entries; \
-		pWaitingEntry<pWaitingEnd; pWaitingEntry++)
+	pWaitingEnd = waitingEntries + waitingCount;
+	for (pWaitingEntry=waitingEntries; pWaitingEntry<pWaitingEnd;
+            pWaitingEntry++)
 	{
 		pSchedEnd = newEntries + newCount;
 		for (pSchedEntry=newEntries; pSchedEntry<pSchedEnd; \
 			pSchedEntry++)
 		{
 			if (pWaitingEntry->id == pSchedEntry->id)
-			{
-				memcpy(pSchedEntry, pWaitingEntry, \
-					sizeof(ScheduleEntry));
-				break;
-			}
+            {
+                *pSchedEntry = *pWaitingEntry;
+                break;
+            }
 		}
 
 		if (pSchedEntry == pSchedEnd)
 		{
-			memcpy(pSchedEntry, pWaitingEntry, \
-				sizeof(ScheduleEntry));
+			*pSchedEntry = *pWaitingEntry;
 			newCount++;
 		}
 	}
@@ -331,7 +343,7 @@ static int do_check_waiting(ScheduleContext *pContext)
 	logDebug("file: "__FILE__", line: %d, " \
 		"schedule add entries: %d, replace entries: %d", 
 		__LINE__, newCount - pScheduleArray->count, \
-		waiting_schedule_array.count - (newCount - pScheduleArray->count));
+		waitingCount - (newCount - pScheduleArray->count));
 
 	if (pScheduleArray->entries != NULL)
 	{
@@ -339,13 +351,9 @@ static int do_check_waiting(ScheduleContext *pContext)
 	}
 	pScheduleArray->entries = newEntries;
 	pScheduleArray->count = newCount;
-
-	free(waiting_schedule_array.entries);
-	waiting_schedule_array.count = 0;
-	waiting_schedule_array.entries = NULL;
+	free(waitingEntries);
 
 	sched_make_chain(pContext);
-
 	return 0;
 }
 
@@ -368,6 +376,10 @@ static void *sched_call_func(void *args)
     void *func_args;
     TaskFunc task_func;
     int task_id;
+
+#ifdef OS_LINUX
+    prctl(PR_SET_NAME, "sched-call");
+#endif
 
     pEntry = (ScheduleEntry *)args;
     task_func = pEntry->task_func;
@@ -397,15 +409,20 @@ static void *sched_thread_entrance(void *args)
 	int exec_count;
 	int i;
 
+#ifdef OS_LINUX
+    prctl(PR_SET_NAME, "sched");
+#endif
+
 	pContext = (ScheduleContext *)args;
-	if (sched_init_entries(&(pContext->scheduleArray)) != 0)
+	if (sched_init_entries(pContext->scheduleArray.entries,
+                pContext->scheduleArray.count) != 0)
 	{
 		free(pContext);
 		return NULL;
 	}
 	sched_make_chain(pContext);
 
-	g_schedule_flag = true;
+    __sync_bool_compare_and_swap(&g_schedule_flag, 0, 1);
 	while (*(pContext->pcontinue_flag))
 	{
 		g_current_time = time(NULL);
@@ -418,6 +435,11 @@ static void *sched_thread_entrance(void *args)
 			continue;
 		}
 
+        /*
+        logInfo("task count: %d, next_call_time: %d, g_current_time: %d",
+                pContext->scheduleArray.count,
+                (int)pContext->head->next_call_time, (int)g_current_time);
+                */
         while (pContext->head->next_call_time > g_current_time &&
                 *(pContext->pcontinue_flag))
         {
@@ -438,7 +460,7 @@ static void *sched_thread_entrance(void *args)
 
 		exec_count = 0;
 		pCurrent = pContext->head;
-		while (*(pContext->pcontinue_flag) && (pCurrent != NULL \
+		while (*(pContext->pcontinue_flag) && (pCurrent != NULL
 			&& pCurrent->next_call_time <= g_current_time))
 		{
 			//logInfo("exec task id: %d", pCurrent->id);
@@ -462,13 +484,13 @@ static void *sched_thread_entrance(void *args)
                 }
                 else
                 {
-                    usleep(1*1000);
+                    fc_sleep_ms(1);
                     for (i=1; !pCurrent->thread_running && i<100; i++)
                     {
                         logDebug("file: "__FILE__", line: %d, "
                                 "task_id: %d, waiting thread ready, count %d",
                                 __LINE__, pCurrent->id, i);
-                        usleep(1*1000);
+                        fc_sleep_ms(1);
                     }
                 }
             }
@@ -529,7 +551,7 @@ static void *sched_thread_entrance(void *args)
 		}
 	}
 
-	g_schedule_flag = false;
+    __sync_bool_compare_and_swap(&g_schedule_flag, 1, 0);
 
 	logDebug("file: "__FILE__", line: %d, " \
 		"schedule thread exit", __LINE__);
@@ -541,7 +563,6 @@ static void *sched_thread_entrance(void *args)
 static int sched_dup_array(const ScheduleArray *pSrcArray, \
 		ScheduleArray *pDestArray)
 {
-	int result;
 	int bytes;
 
 	if (pSrcArray->count == 0)
@@ -552,15 +573,10 @@ static int sched_dup_array(const ScheduleArray *pSrcArray, \
 	}
 
 	bytes = sizeof(ScheduleEntry) * pSrcArray->count;
-	pDestArray->entries = (ScheduleEntry *)malloc(bytes);
+	pDestArray->entries = (ScheduleEntry *)fc_malloc(bytes);
 	if (pDestArray->entries == NULL)
 	{
-		result = errno != 0 ? errno : ENOMEM;
-		logError("file: "__FILE__", line: %d, " \
-			"malloc %d bytes failed, " \
-			"errno: %d, error info: %s", \
-			__LINE__, bytes, result, STRERROR(result));
-		return result;
+		return ENOMEM;
 	}
 
 	memcpy(pDestArray->entries, pSrcArray->entries, bytes);
@@ -568,28 +584,17 @@ static int sched_dup_array(const ScheduleArray *pSrcArray, \
 	return 0;
 }
 
-static int sched_append_array(const ScheduleArray *pSrcArray, \
+static int sched_append_array(const ScheduleArray *pSrcArray,
 		ScheduleArray *pDestArray)
 {
-	int result;
 	int bytes;
     ScheduleEntry *new_entries;
 
-	if (pSrcArray->count == 0)
-	{
-		return 0;
-	}
-
 	bytes = sizeof(ScheduleEntry) * (pDestArray->count + pSrcArray->count);
-	new_entries = (ScheduleEntry *)malloc(bytes);
+	new_entries = (ScheduleEntry *)fc_malloc(bytes);
 	if (new_entries == NULL)
 	{
-		result = errno != 0 ? errno : ENOMEM;
-		logError("file: "__FILE__", line: %d, " \
-			"malloc %d bytes failed, " \
-			"errno: %d, error info: %s", \
-			__LINE__, bytes, result, STRERROR(result));
-		return result;
+		return ENOMEM;
 	}
 
     if (pDestArray->entries != NULL)
@@ -606,37 +611,66 @@ static int sched_append_array(const ScheduleArray *pSrcArray, \
 	return 0;
 }
 
+int sched_thread_init_ex(ScheduleContext **ppContext)
+{
+    int result;
+
+    *ppContext = (ScheduleContext *)fc_malloc(sizeof(ScheduleContext));
+    if (*ppContext == NULL)
+    {
+        return ENOMEM;
+    }
+    memset(*ppContext, 0, sizeof(ScheduleContext));
+
+    if ((result=init_pthread_lock(&(*ppContext)->lock)) != 0)
+    {
+        return result;
+    }
+
+    return 0;
+}
+
 int sched_add_entries(const ScheduleArray *pScheduleArray)
 {
-	int result;
+    ScheduleEntry *newStart;
+    int old_count;
+    int result;
 
-	if (pScheduleArray->count == 0)
-	{
-		logDebug("file: "__FILE__", line: %d, " \
-			"no schedule entry", __LINE__);
-		return ENOENT;
-	}
-
-    if (waiting_schedule_array.entries != NULL)
+    if (pScheduleArray->count <= 0)
     {
-        if (g_schedule_flag)
+        logWarning("file: "__FILE__", line: %d, "
+                "no schedule entry", __LINE__);
+        return ENOENT;
+    }
+
+    if (schedule_context == NULL)
+    {
+        if ((result=sched_thread_init_ex(&schedule_context)) != 0)
         {
-    	    while (waiting_schedule_array.entries != NULL)
-	        {
-	        	logDebug("file: "__FILE__", line: %d, " \
-			        "waiting for schedule array ready ...", __LINE__);
-	        	sleep(1);
-	        }
+            return result;
         }
     }
 
-	if ((result=sched_append_array(pScheduleArray,
-                    &waiting_schedule_array)) != 0)
-	{
-		return result;
-	}
+    PTHREAD_MUTEX_LOCK(&schedule_context->lock);
+    do {
+        old_count = waiting_schedule_array.count;
+        if ((result=sched_append_array(pScheduleArray,
+                        &waiting_schedule_array)) != 0)
+        {
+            break;
+        }
 
-	return sched_init_entries(&waiting_schedule_array);
+        newStart = waiting_schedule_array.entries + old_count;
+        if ((result=sched_init_entries(newStart, pScheduleArray->count)) != 0)
+        {
+            waiting_schedule_array.count = newStart -
+                waiting_schedule_array.entries;   //rollback
+            break;
+        }
+    } while (0);
+    PTHREAD_MUTEX_UNLOCK(&schedule_context->lock);
+
+    return result;
 }
 
 int sched_del_entry(const int id)
@@ -661,24 +695,10 @@ int sched_del_entry(const int id)
 
 int sched_start_ex(ScheduleArray *pScheduleArray, pthread_t *ptid,
 		const int stack_size, bool * volatile pcontinue_flag,
-        ScheduleContext **ppContext)
+        ScheduleContext *pContext)
 {
 	int result;
 	pthread_attr_t thread_attr;
-	ScheduleContext *pContext;
-
-	pContext = (ScheduleContext *)malloc(sizeof(ScheduleContext));
-	if (pContext == NULL)
-	{
-		result = errno != 0 ? errno : ENOMEM;
-		logError("file: "__FILE__", line: %d, " \
-			"malloc %d bytes failed, " \
-			"errno: %d, error info: %s", \
-			__LINE__, (int)sizeof(ScheduleContext), \
-			result, STRERROR(result));
-		return result;
-	}
-    memset(pContext, 0, sizeof(ScheduleContext));
 
 	if ((result=init_pthread_attr(&thread_attr, stack_size)) != 0)
 	{
@@ -686,7 +706,7 @@ int sched_start_ex(ScheduleArray *pScheduleArray, pthread_t *ptid,
 		return result;
 	}
 
-	if ((result=sched_dup_array(pScheduleArray, \
+	if ((result=sched_dup_array(pScheduleArray,
 			&(pContext->scheduleArray))) != 0)
 	{
 		free(pContext);
@@ -695,8 +715,9 @@ int sched_start_ex(ScheduleArray *pScheduleArray, pthread_t *ptid,
 
     if (timer_slot_count > 0)
     {
-        if ((result=fast_mblock_init(&pContext->mblock,
-                        sizeof(FastDelayTask), mblock_alloc_once)) != 0)
+        if ((result=fast_mblock_init_ex1(&pContext->delay_task_allocator,
+                        "sched_delay_task", sizeof(FastDelayTask),
+                        mblock_alloc_once, 0, NULL, NULL, true)) != 0)
         {
 	    	free(pContext);
 		    return result;
@@ -709,7 +730,9 @@ int sched_start_ex(ScheduleArray *pScheduleArray, pthread_t *ptid,
 	    	free(pContext);
 		    return result;
 	    }
-        if ((result=init_pthread_lock(&pContext->delay_queue.lock)) != 0)
+
+        if ((result=fc_queue_init(&pContext->delay_queue, (long)
+                        (&((FastDelayTask *)NULL)->next))) != 0)
         {
 	    	free(pContext);
 		    return result;
@@ -728,7 +751,6 @@ int sched_start_ex(ScheduleArray *pScheduleArray, pthread_t *ptid,
 			__LINE__, result, STRERROR(result));
 	}
 
-    *ppContext = pContext;
 	pthread_attr_destroy(&thread_attr);
 	return result;
 }
@@ -736,8 +758,16 @@ int sched_start_ex(ScheduleArray *pScheduleArray, pthread_t *ptid,
 int sched_start(ScheduleArray *pScheduleArray, pthread_t *ptid,
 		const int stack_size, bool * volatile pcontinue_flag)
 {
+    int result;
+    if (schedule_context == NULL)
+    {
+        if ((result=sched_thread_init_ex(&schedule_context)) != 0)
+        {
+            return result;
+        }
+    }
     return sched_start_ex(pScheduleArray, ptid, stack_size,
-            pcontinue_flag, &schedule_context);
+            pcontinue_flag, schedule_context);
 }
 
 void sched_set_delay_params(const int slot_count, const int alloc_once)
@@ -765,6 +795,8 @@ int sched_add_delay_task_ex(ScheduleContext *pContext, TaskFunc task_func,
         void *func_args, const int delay_seconds, const bool new_thread)
 {
     FastDelayTask *task;
+    bool notify;
+
     if (!pContext->timer_init)
     {
 		logError("file: "__FILE__", line: %d, "
@@ -773,7 +805,8 @@ int sched_add_delay_task_ex(ScheduleContext *pContext, TaskFunc task_func,
         return EOPNOTSUPP;
     }
 
-    task = (FastDelayTask *)fast_mblock_alloc_object(&pContext->mblock);
+    task = (FastDelayTask *)fast_mblock_alloc_object(
+            &pContext->delay_task_allocator);
     if (task == NULL)
     {
         return ENOMEM;
@@ -791,18 +824,7 @@ int sched_add_delay_task_ex(ScheduleContext *pContext, TaskFunc task_func,
         task->timer.expires = g_current_time;
     }
 
-    pthread_mutex_lock(&pContext->delay_queue.lock);
-    if (pContext->delay_queue.head == NULL)
-    {
-        pContext->delay_queue.head = task;
-    }
-    else
-    {
-        pContext->delay_queue.tail->next = task;
-    }
-    pContext->delay_queue.tail = task;
-    pthread_mutex_unlock(&pContext->delay_queue.lock);
-
+    fc_queue_push_ex(&pContext->delay_queue, task, &notify);
     return 0;
 }
 
@@ -816,18 +838,10 @@ int sched_add_delay_task(TaskFunc task_func, void *func_args,
 static void sched_deal_task_queue(ScheduleContext *pContext)
 {
     FastDelayTask *task;
+    struct fc_queue_info qinfo;
 
-    pthread_mutex_lock(&pContext->delay_queue.lock);
-    if (pContext->delay_queue.head == NULL)
-    {
-        pthread_mutex_unlock(&pContext->delay_queue.lock);
-        return;
-    }
-    task  = pContext->delay_queue.head;
-    pContext->delay_queue.head = NULL;
-    pContext->delay_queue.tail = NULL;
-    pthread_mutex_unlock(&pContext->delay_queue.lock);
-
+    fc_queue_try_pop_to_queue(&pContext->delay_queue, &qinfo);
+    task = qinfo.head;
     while (task != NULL)
     {
         fast_timer_add(&pContext->timer, (FastTimerEntry *)task);
@@ -846,6 +860,10 @@ static void *sched_call_delay_func(void *args)
     ScheduleContext *pContext;
     FastDelayTask *task;
 
+#ifdef OS_LINUX
+    prctl(PR_SET_NAME, "sched-delay");
+#endif
+
     delay_context = (struct delay_thread_context *)args;
     task = delay_context->task;
     pContext = delay_context->schedule_context;
@@ -859,7 +877,7 @@ static void *sched_call_delay_func(void *args)
     logDebug("file: "__FILE__", line: %d, " \
             "delay thread exit, task args: %p", __LINE__, task->func_args);
 
-    fast_mblock_free_object(&pContext->mblock, task);
+    fast_mblock_free_object(&pContext->delay_task_allocator, task);
     pthread_detach(pthread_self());
 	return NULL;
 }
@@ -883,7 +901,7 @@ static void deal_timeout_tasks(ScheduleContext *pContext, FastTimerEntry *head)
         if (!task->new_thread)
         {
             task->task_func(task->func_args);
-            fast_mblock_free_object(&pContext->mblock, task);
+            fast_mblock_free_object(&pContext->delay_task_allocator, task);
         }
         else
         {
@@ -905,13 +923,13 @@ static void deal_timeout_tasks(ScheduleContext *pContext, FastTimerEntry *head)
             }
             else
             {
-               usleep(1*1000);
+               fc_sleep_ms(1);
                for (i=1; !task->thread_running && i<100; i++)
                {
                    logDebug("file: "__FILE__", line: %d, "
                            "task args: %p, waiting thread ready, count %d",
                            __LINE__, task->func_args, i);
-                   usleep(1*1000);
+                   fc_sleep_ms(1);
                }
             }
         }

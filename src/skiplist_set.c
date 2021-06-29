@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2015 Happy Fish / YuQing
-*
-* libfastcommon may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 //skiplist_set.c
 
@@ -15,12 +22,15 @@
 #include <errno.h>
 #include <assert.h>
 #include "logger.h"
+#include "fc_memory.h"
 #include "skiplist_set.h"
 
 int skiplist_set_init_ex(SkiplistSet *sl, const int level_count,
         skiplist_compare_func compare_func, skiplist_free_func free_func,
         const int min_alloc_elements_once)
 {
+    const int64_t alloc_elements_limit = 0;
+    char name[64];
     int bytes;
     int element_size;
     int i;
@@ -35,29 +45,23 @@ int skiplist_set_init_ex(SkiplistSet *sl, const int level_count,
         return EINVAL;
     }
 
-    if (level_count > 30) {
+    if (level_count > SKIPLIST_MAX_LEVEL_COUNT) {
         logError("file: "__FILE__", line: %d, "
-                "level count: %d is too large",
-                __LINE__, level_count);
+                "level count: %d is too large exceeds %d",
+                __LINE__, level_count, SKIPLIST_MAX_LEVEL_COUNT);
         return E2BIG;
     }
 
     bytes = sizeof(SkiplistSetNode *) * level_count;
-    sl->tmp_previous = (SkiplistSetNode **)malloc(bytes);
+    sl->tmp_previous = (SkiplistSetNode **)fc_malloc(bytes);
     if (sl->tmp_previous == NULL) {
-        logError("file: "__FILE__", line: %d, "
-                "malloc %d bytes fail, errno: %d, error info: %s",
-                __LINE__, bytes, errno, STRERROR(errno));
-        return errno != 0 ? errno : ENOMEM;
+        return ENOMEM;
     }
 
     bytes = sizeof(struct fast_mblock_man) * level_count;
-    sl->mblocks = (struct fast_mblock_man *)malloc(bytes);
+    sl->mblocks = (struct fast_mblock_man *)fc_malloc(bytes);
     if (sl->mblocks == NULL) {
-        logError("file: "__FILE__", line: %d, "
-                "malloc %d bytes fail, errno: %d, error info: %s",
-                __LINE__, bytes, errno, STRERROR(errno));
-        return errno != 0 ? errno : ENOMEM;
+        return ENOMEM;
     }
     memset(sl->mblocks, 0, bytes);
 
@@ -70,9 +74,12 @@ int skiplist_set_init_ex(SkiplistSet *sl, const int level_count,
     }
 
     for (i=level_count-1; i>=0; i--) {
-        element_size = sizeof(SkiplistSetNode) + sizeof(SkiplistSetNode *) * (i + 1);
-        if ((result=fast_mblock_init_ex(sl->mblocks + i,
-            element_size, alloc_elements_once, NULL, false)) != 0)
+        sprintf(name, "sl-set-level%02d", i);
+        element_size = sizeof(SkiplistSetNode) +
+            sizeof(SkiplistSetNode *) * (i + 1);
+        if ((result=fast_mblock_init_ex1(sl->mblocks + i, name,
+            element_size, alloc_elements_once, alloc_elements_limit,
+            NULL, NULL, false)) != 0)
         {
             return result;
         }

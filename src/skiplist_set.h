@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2015 Happy Fish / YuQing
-*
-* libfastcommon may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 //a set implemented by skiplist, the entry can occur only once
 
@@ -79,6 +86,15 @@ static inline void *skiplist_set_next(SkiplistSetIterator *iterator)
     data = iterator->current->data;
     iterator->current = iterator->current->links[0];
     return data;
+}
+
+static inline void *skiplist_set_get_first(SkiplistSet *sl)
+{
+    if (sl->top->links[0] != sl->tail) {
+        return sl->top->links[0]->data;
+    } else {
+        return NULL;
+    }
 }
 
 static inline bool skiplist_set_empty(SkiplistSet *sl)

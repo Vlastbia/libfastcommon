@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -12,6 +19,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include "pthread_func.h"
+#include "fc_memory.h"
 #include "hash.h"
 
 static unsigned int prime_array[] = {
@@ -59,7 +67,7 @@ static int _hash_alloc_buckets(HashArray *pHash, const unsigned int old_capacity
 		return ENOSPC;
 	}
 
-	pHash->buckets = (HashData **)malloc(bytes);
+	pHash->buckets = (HashData **)fc_malloc(bytes);
 	if (pHash->buckets == NULL)
 	{
 		return ENOMEM;
@@ -144,7 +152,7 @@ int hash_set_locks(HashArray *pHash, const int lock_count)
 	}
 
 	bytes = sizeof(pthread_mutex_t) * lock_count;
-	pHash->locks = (pthread_mutex_t *)malloc(bytes);
+	pHash->locks = (pthread_mutex_t *)fc_malloc(bytes);
 	if (pHash->locks == NULL)
 	{
 		return ENOMEM;
@@ -461,7 +469,7 @@ int hash_best_op(HashArray *pHash, const int suggest_capacity)
 	}
 
 	old_capacity = *pHash->capacity;
-	new_capacity = (unsigned int *)malloc(sizeof(unsigned int));
+	new_capacity = (unsigned int *)fc_malloc(sizeof(unsigned int));
 	if (new_capacity == NULL)
 	{
 		return -ENOMEM;
@@ -704,7 +712,7 @@ int hash_insert_ex(HashArray *pHash, const void *key, const int key_len, \
 		return -ENOSPC;
 	}
 
-	pBuff = (char *)malloc(bytes);
+	pBuff = (char *)fc_malloc(bytes);
 	if (pBuff == NULL)
 	{
 		return -ENOMEM;
@@ -861,7 +869,7 @@ int hash_partial_set(HashArray *pHash, const void *key, const int key_len,
 				break;
 			}
 
-			pNewBuff = (char *)malloc(offset + value_len);
+			pNewBuff = (char *)fc_malloc(offset + value_len);
 			if (pNewBuff == NULL)
 			{
 				result = errno != 0 ? errno : ENOMEM;
@@ -1300,7 +1308,7 @@ int calc_hashnr1_ex(const void* key, const int key_len, \
  \
   h = init_value; \
   pEnd = (unsigned char *)key + key_len; \
-  for (p = (unsigned char *)key; p!= pEnd; p++) \
+  for (p = (unsigned char *)key; p != pEnd; p++) \
   { \
     h = 31 * h + *p; \
   } \

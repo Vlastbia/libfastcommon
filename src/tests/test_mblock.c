@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -165,8 +180,8 @@ int main(int argc, char *argv[])
 
     fast_mblock_manager_init();
 
-    fast_mblock_init_ex2(&mblock1, "mblock1", 1024, 128, NULL, false, NULL, NULL, NULL);
-    fast_mblock_init_ex2(&mblock2, "mblock2", 1024, 100, NULL, false, NULL, NULL, NULL);
+    fast_mblock_init_ex1(&mblock1, "mblock1", 1024, 128, 0, NULL, NULL, false);
+    fast_mblock_init_ex1(&mblock2, "mblock2", 1024, 100, 0, NULL, NULL, false);
    
     count = 2048;
     objs = (struct my_struct *)malloc(sizeof(struct my_struct) * count);

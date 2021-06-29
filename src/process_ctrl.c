@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,41 +112,50 @@ static int do_stop(const char *pidFilename, const bool bShowError, pid_t *pid)
   }
 }
 
-int process_stop(const char *pidFilename)
+int process_stop_ex(const char *pidFilename, const bool bShowError)
 {
+#define MAX_WAIT_COUNT  300
   pid_t pid;
   int result;
+  int sig;
+  int i;
 
-  result = do_stop(pidFilename, true, &pid);
-  if (result != 0) {
+  if ((result=do_stop(pidFilename, bShowError, &pid)) != 0) {
     return result;
   }
 
   fprintf(stderr, "waiting for pid [%d] exit ...\n", (int)pid);
-  do {
-    sleep(1);
-  } while (kill(pid, SIGTERM) == 0);
-  fprintf(stderr, "pid [%d] exit.\n", (int)pid);
+  for (i=0; i<MAX_WAIT_COUNT; i++) {
+    sig = (i % 10 == 0) ? SIGTERM : 0;
+    if (kill(pid, sig) != 0) {
+      break;
+    }
 
+    usleep(100 * 1000);
+  }
+
+  if (i == MAX_WAIT_COUNT) {
+    if (kill(pid, SIGKILL) == 0) {
+      fprintf(stderr, "waiting for pid [%d] exit timeout, "
+              "force kill!\n", (int)pid);
+      usleep(100 * 1000);
+    }
+  }
+
+  fprintf(stderr, "pid [%d] exit.\n\n", (int)pid);
   return 0;
 }
 
 int process_restart(const char *pidFilename)
 {
+  const bool bShowError = false;
   int result;
-  pid_t pid;
 
-  result = do_stop(pidFilename, false, &pid);
-  if (result == 0) {
-    fprintf(stderr, "waiting for pid [%d] exit ...\n", (int)pid);
-    do {
-      sleep(1);
-    } while (kill(pid, SIGTERM) == 0);
-    fprintf(stderr, "starting ...\n");
-  }
-
+  result = process_stop_ex(pidFilename, bShowError);
   if (result == ENOENT || result == ESRCH) {
-    return 0;
+    result = 0;
+  } else if (result == 0) {
+    fprintf(stderr, "starting ...\n");
   }
 
   return result;
@@ -220,33 +244,33 @@ int process_start(const char* pidFilename)
     }
 }
 
-int process_exist(const char *pidFilename)
+int process_exist(const char *pidFilename, pid_t *pid)
 {
-  pid_t pid;
   int result;
 
-  if ((result=get_pid_from_file(pidFilename, &pid)) != 0) {
+  if ((result=get_pid_from_file(pidFilename, pid)) != 0) {
     if (result == ENOENT) {
-      return false;
+      return result;
     }
     else {
       fprintf(stderr, "get pid from file: %s fail, " \
           "errno: %d, error info: %s\n",
           pidFilename, result, strerror(result));
-      return true;
+      return result;
     }
   }
 
-  if (kill(pid, 0) == 0) {
-    return true;
+  if (kill(*pid, 0) == 0) {
+    return 0;
   }
   else if (errno == ENOENT || errno == ESRCH) {
-    return false;
+    return ENOENT;
   }
   else {
+    result = errno != 0 ? errno : EPERM;
     fprintf(stderr, "kill pid: %d fail, errno: %d, error info: %s\n",
-        (int)pid, errno, strerror(errno));
-    return true;
+        (int)*pid, result, strerror(result));
+    return result;
   }
 }
 
@@ -305,6 +329,10 @@ int get_base_path_from_conf_file(const char *filename, char *base_path,
 
 int process_action(const char *pidFilename, const char *action, bool *stop)
 {
+    const bool bShowError = true;
+    int result;
+    pid_t pid;
+
 	*stop = false;
 	if (action == NULL)
 	{
@@ -314,7 +342,24 @@ int process_action(const char *pidFilename, const char *action, bool *stop)
 	if (strcmp(action, "stop") == 0)
 	{
 		*stop = true;
-		return process_stop(pidFilename);
+		return process_stop_ex(pidFilename, bShowError);
+	}
+    else if (strcmp(action, "status") == 0)
+	{
+		*stop = true;
+		result = process_exist(pidFilename, &pid);
+        switch (result) {
+            case 0:
+                printf("Running, pid: %d\n", (int)pid);
+                break;
+            case ENOENT:
+                printf("NOT running\n");
+                break;
+            default:
+                printf("Unkown status\n");
+                break;
+        }
+        return result;
 	}
 	else if (strcmp(action, "restart") == 0)
 	{

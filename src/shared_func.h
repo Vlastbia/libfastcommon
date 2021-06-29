@@ -1,21 +1,41 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #ifndef SHARED_FUNC_H
 #define SHARED_FUNC_H
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/resource.h>
 #include "common_define.h"
+#include "fc_memory.h"
 #include "ini_file_reader.h"
+
+#define NORMALIZE_FLAGS_URL_ENABLED        1
+#define NORMALIZE_FLAGS_URL_APPEND_PARAMS  2
+
+#define NORMALIZE_FLAGS_URL_ENABLED_AND_APPEND_PARAMS  \
+    (NORMALIZE_FLAGS_URL_ENABLED | NORMALIZE_FLAGS_URL_APPEND_PARAMS)
+
+#define resolve_path(from, filename, full_filename, size)  \
+    normalize_path_ex(from, filename, full_filename, size, \
+            NORMALIZE_FLAGS_URL_ENABLED_AND_APPEND_PARAMS)
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,6 +74,18 @@ char *formatDatetime(const time_t nTime, \
  *  return: character count
 */
 int getCharLen(const char *s);
+
+/** string replace
+ *  parameters:
+ *  	src: the input string
+ *      old_str: the old string
+ *      new_str: the new string
+ *      dest: the output string
+ *      size: the size of output buffer
+ *  return: 0 for success, != 0 for fail
+*/
+int str_replace(const string_t *src, const string_t *old_str,
+        const string_t *new_str, string_t *dest, const int size);
 
 /** replace \r and \n to space
  *  parameters:
@@ -362,6 +394,24 @@ char *urldecode_ex(const char *src, const int src_len, char *dest, int *dest_len
 */
 int getOccurCount(const char *src, const char seperator);
 
+
+/** get the file line count
+ *  parameters:
+ *  	filename: the filename
+ *  	until_offset: util the file offset, -1 for file end
+ *  	line_count: store the line count
+ *  return: error no, 0 success, != 0 fail
+*/
+int fc_get_file_line_count_ex(const char *filename,
+        const int64_t until_offset, int64_t *line_count);
+
+static inline int fc_get_file_line_count(const char *filename,
+        int64_t *line_count)
+{
+    const int64_t until_offset = -1;
+    return fc_get_file_line_count_ex(filename, until_offset, line_count);
+}
+
 /** split string
  *  parameters:
  *  	src: the source string, will be modified by this function
@@ -391,6 +441,18 @@ void freeSplit(char **p);
 */
 int splitEx(char *src, const char seperator, char **pCols, const int nMaxCols);
 
+
+/** split string
+ *  parameters:
+ *  	src: the source string
+ *  	seperator: seperator char
+ *  	dest: store split strings
+ *  	max_count: max split count
+ *      ignore_empty: if ignore empty string
+ *  return: string array count
+*/
+int split_string_ex(const string_t *src, const char seperator,
+        string_t *dest, const int max_count, const bool ignore_empty);
 
 /** split string by delimiter characters
  *  parameters:
@@ -480,6 +542,22 @@ void set_log_level(char *pLogLevel);
 int load_allow_hosts(IniContext *pIniContext, \
 		in_addr_t **allow_ip_addrs, int *allow_ip_count);
 
+
+/** get time item from config context
+ *  parameters:
+ *  	ini_ctx: the full ini context
+ *  	item_name: item name in config file, time format as hour:minute, such as 15:25
+ *  	pTimeInfo: store time info
+ *  	default_hour: default hour value
+ *  	default_minute: default minute value
+ *  	bRetryGlobal: if fetch from global section when the item not exist
+ *  return: error no , 0 success, != 0 fail
+*/
+int get_time_item_from_conf_ex(IniFullContext *ini_ctx,
+		const char *item_name, TimeInfo *pTimeInfo,
+		const byte default_hour, const byte default_minute,
+        const bool bRetryGlobal);
+
 /** get time item from config context
  *  parameters:
  *  	pIniContext: the config context
@@ -533,6 +611,14 @@ int getFileContent(const char *filename, char **buff, int64_t *file_size);
 */
 int getFileContentEx(const char *filename, char *buff, \
 		int64_t offset, int64_t *size);
+
+/** get file size
+ *  parameters:
+ *  	filename: the filename
+ *  	file_size: store the file size
+ *  return: error no , 0 success, != 0 fail
+*/
+int getFileSize(const char *filename, int64_t *file_size);
 
 /** write to file
  *  parameters:
@@ -626,7 +712,7 @@ int cmp_by_ip_addr_t(const void *p1, const void *p2);
  *  	bytes: store the parsed bytes
  *  return: error no , 0 success, != 0 fail
 */
-int parse_bytes(char *pStr, const int default_unit_bytes, int64_t *bytes);
+int parse_bytes(const char *pStr, const int default_unit_bytes, int64_t *bytes);
 
 /** set rand seed
  *  return: error no , 0 success, != 0 fail
@@ -664,6 +750,10 @@ double get_line_distance_km(const double lat1, const double lon1,
  */
 bool is_private_ip(const char* ip);
 
+/** get current time in ns
+ *  return: current time
+ */
+int64_t get_current_time_ns();
 
 /** get current time in us
  *  return: current time
@@ -816,13 +906,13 @@ bool starts_with(const char *str, const char *needle);
 */
 bool ends_with(const char *str, const char *needle);
 
-/** strdup
+/** strdup extension
  *  parameters:
- *  	str: the string to duplicate
+ *      str: the string to duplicate
  *      len: the length of string
  *  return: the duplicated string, NULL for fail
 */
-char *fc_strdup(const char *str, const int len);
+char *fc_strdup1(const char *str, const int len);
 
 /** memmem
  *  parameters:
@@ -831,6 +921,14 @@ char *fc_strdup(const char *str, const int len);
  *  return: the matched string, NULL for fail
 */
 const char *fc_memmem(const string_t *str, const string_t *needle);
+
+/** memmem
+ *  parameters:
+ *  	str: the string to match
+ *      needle: the needle string
+ *  return: the matched string, NULL for fail
+*/
+const char *fc_memrchr(const char *str, const int ch, const int len);
 
 /** format HTTP Date as: Sat, 11 Mar 2017 21:49:51 GMT
  *  parameters:
@@ -846,10 +944,199 @@ char *format_http_date(time_t t, BufferInfo *buffer);
  *      filename: the filename to resolve path
  *      full_filename: store the resolved full path filename
  *      size: the max size of full_filename
- *  return: the resolved full path filename
+ *  return: length of the resolved full path
 */
-char *resolve_path(const char *from, const char *filename,
+int normalize_path(const char *from, const char *filename,
         char *full_filename, const int size);
+
+/** return absolute uri (the second parameter)
+ *  parameters:
+ *  	from: the input uri to get base path
+ *      uri: the uri to resolve
+ *      dest: store the resolved absolute uri
+ *      size: the max size of dest
+ *  return: length of the resolved uri
+*/
+int normalize_uri(const string_t *from, const char *uri,
+        char *dest, const int size);
+
+/** return full path for the filename (the second parameter)
+ *  parameters:
+ *  	from: the input full path filename to get base path
+ *      filename: the filename to resolve path
+ *      full_filename: store the resolved full path filename
+ *      size: the max size of full_filename
+ *      flags: 
+ *           NORMALIZE_FLAGS_URL_ENABLED: support url resolve
+ *           NORMALIZE_FLAGS_URL_APPEND_PARAMS: append params of from
+ *  return: length of the resolved full path
+*/
+int normalize_path_ex(const char *from, const char *filename,
+        char *full_filename, const int size, const int flags);
+
+
+/** get gzip command full filename
+ *  return: the gzip command full filename
+*/
+const char *get_gzip_command_filename();
+
+/** delete file
+ *  parameters:
+ *      filename: the filename to delete
+ *      caption: the caption of this filename
+ *  return: error no, 0 success, != 0 fail
+*/
+int fc_delete_file_ex(const char *filename, const char *caption);
+
+static inline int fc_delete_file(const char *filename)
+{
+    return fc_delete_file_ex(filename, "");
+}
+
+/** if prime number
+ *  parameters:
+ *  	n: the number to detect
+ *  return: true for prime number, otherwise false
+*/
+bool fc_is_prime(const int64_t n);
+
+
+/** find the largest prime number not greater than n
+ *  parameters:
+ *  	n: the number to detect
+ *  return: the largest prime number near n
+*/
+int64_t fc_floor_prime(const int64_t n);
+
+/** find the smallest prime number not less than n
+ *  parameters:
+ *  	n: the number to detect
+ *  return: the smallest prime number near n
+*/
+int64_t fc_ceil_prime(const int64_t n);
+
+/** init buffer
+ *  parameters:
+ *      buffer: the buffer to init
+ *      buffer_size: the buffer size
+ *  return: error no, 0 success, != 0 fail
+*/
+int fc_init_buffer(BufferInfo *buffer, const int buffer_size);
+
+/** free buffer
+ *  parameters:
+ *      buffer: the buffer to free
+ *  return: none
+*/
+void fc_free_buffer(BufferInfo *buffer);
+
+
+static inline int fc_get_umask()
+{
+    mode_t mode;
+
+    mode = umask(0); //fetch
+    umask(mode);     //restore
+    return mode;
+}
+
+int fc_check_mkdir_ex(const char *path, const mode_t mode, bool *created);
+
+static inline int fc_check_mkdir(const char *path, const mode_t mode)
+{
+    bool created;
+    return fc_check_mkdir_ex(path, mode, &created);
+}
+
+int fc_mkdirs_ex(const char *path, const mode_t mode, int *create_count);
+
+static inline int fc_mkdirs(const char *path, const mode_t mode)
+{
+    int create_count;
+    return fc_mkdirs_ex(path, mode, &create_count);
+}
+
+int fc_get_first_line(const char *filename, char *buff,
+        const int buff_size, string_t *line);
+
+int fc_get_last_line(const char *filename, char *buff,
+        const int buff_size, int64_t *file_size, string_t *line);
+
+int fc_get_last_lines(const char *filename, char *buff,
+        const int buff_size, string_t *lines, int *count);
+
+/** if the input path contains the needle path
+ *  parameters:
+ *      path: the absolute path to match
+ *      needle: the needle path, must be absolute
+ *      result: store the errno
+ *  return: true for contain, otherwise false
+*/
+bool fc_path_contains(const string_t *path, const string_t *needle,
+        int *result);
+
+
+/** sleep in milliseconds
+ *  parameters:
+ *      milliseconds: milliseconds to sleep
+ *  return: 0 for success, != 0 for fail
+*/
+static inline int fc_sleep_ms(const int milliseconds)
+{
+    struct timespec ts;
+    ts.tv_sec = milliseconds / 1000;
+    ts.tv_nsec = (milliseconds % 1000) * (1000 * 1000);
+    if (nanosleep(&ts, NULL) == 0) {
+        return 0;
+    } else {
+        return errno != 0 ? errno : EINVAL;
+    }
+}
+
+int fc_check_filename_ex(const string_t *filename, const char *caption,
+        char *error_info, int *error_len, const int error_size);
+
+int fc_check_filename(const string_t *filename, const char *caption);
+
+/** is pure digital string
+ *  parameters:
+ *      str: the string to detect
+ *  return: true for digital string, otherwise false
+ */
+bool is_digital_string(const char *str);
+
+static inline int fc_check_realloc_iovec_array(
+        iovec_array_t *array, const int target_size)
+{
+    int new_alloc;
+    struct iovec *new_iovs;
+
+    if (array->alloc >= target_size) {
+        return 0;
+    }
+
+    if (array->alloc == 0) {
+        new_alloc = 64;
+    } else {
+        new_alloc = array->alloc * 2;
+    }
+    while (new_alloc < target_size) {
+        new_alloc *= 2;
+    }
+
+    new_iovs = (struct iovec *)fc_malloc(
+            sizeof(struct iovec) * new_alloc);
+    if (new_iovs == NULL) {
+        return ENOMEM;
+    }
+
+    if (array->iovs != NULL) {
+        free(array->iovs);
+    }
+    array->iovs = new_iovs;
+    array->alloc = new_alloc;
+    return 0;
+}
 
 #ifdef __cplusplus
 }

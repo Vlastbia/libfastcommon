@@ -1,13 +1,29 @@
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 //fast_task_queue.c
 
 #include <errno.h>
 #include <sys/resource.h>
 #include <pthread.h>
 #include <inttypes.h>
-#include "fast_task_queue.h"
 #include "logger.h"
 #include "shared_func.h"
 #include "pthread_func.h"
+#include "fc_memory.h"
+#include "fast_task_queue.h"
 
 static struct fast_task_queue g_free_queue;
 
@@ -42,6 +58,18 @@ int task_queue_init(struct fast_task_queue *pQueue)
 	return 0;
 }
 
+static void free_mpool(struct mpool_node *mpool, char *end)
+{
+    char *pt;
+    for (pt=(char *)mpool->blocks; pt < end; pt += g_free_queue.block_size)
+    {
+        free(((struct fast_task_info *)pt)->data);
+    }
+
+    free(mpool->blocks);
+    free(mpool);
+}
+
 static struct mpool_node *malloc_mpool(const int total_alloc_size)
 {
 	struct fast_task_info *pTask;
@@ -49,26 +77,16 @@ static struct mpool_node *malloc_mpool(const int total_alloc_size)
 	char *pCharEnd;
 	struct mpool_node *mpool;
 
-	mpool = (struct mpool_node *)malloc(sizeof(struct mpool_node));
+	mpool = (struct mpool_node *)fc_malloc(sizeof(struct mpool_node));
 	if (mpool == NULL)
 	{
-		logError("file: "__FILE__", line: %d, " \
-			"malloc %d bytes fail, " \
-			"errno: %d, error info: %s", \
-			__LINE__, (int)sizeof(struct mpool_node), \
-			errno, STRERROR(errno));
 		return NULL;
 	}
 
 	mpool->next = NULL;
-	mpool->blocks = (struct fast_task_info *)malloc(total_alloc_size);
+	mpool->blocks = (struct fast_task_info *)fc_malloc(total_alloc_size);
 	if (mpool->blocks == NULL)
 	{
-		logError("file: "__FILE__", line: %d, " \
-			"malloc %d bytes fail, " \
-			"errno: %d, error info: %s", \
-			__LINE__, total_alloc_size, \
-			errno, STRERROR(errno));
 		free(mpool);
 		return NULL;
 	}
@@ -88,32 +106,28 @@ static struct mpool_node *malloc_mpool(const int total_alloc_size)
 		}
 		else
 		{
-			pTask->data = (char *)malloc(pTask->size);
+			pTask->data = (char *)fc_malloc(pTask->size);
 			if (pTask->data == NULL)
 			{
-				char *pt;
-
-				logError("file: "__FILE__", line: %d, " \
-					"malloc %d bytes fail, " \
-					"errno: %d, error info: %s", \
-					__LINE__, pTask->size, \
-					errno, STRERROR(errno));
-
-				for (pt=(char *)mpool->blocks; pt < p; \
-					pt += g_free_queue.block_size)
-				{
-					free(((struct fast_task_info *)pt)->data);
-				}
-
-				free(mpool->blocks);
-				free(mpool);
+                free_mpool(mpool, p);
 				return NULL;
 			}
 		}
+
+        if (g_free_queue.init_callback != NULL)
+        {
+            if (g_free_queue.init_callback(pTask) != 0)
+            {
+                free_mpool(mpool, p);
+                return NULL;
+            }
+        }
 	}
 
-	mpool->last_block = (struct fast_task_info *)(pCharEnd - g_free_queue.block_size);
-	for (p=(char *)mpool->blocks; p<(char *)mpool->last_block; p += g_free_queue.block_size)
+	mpool->last_block = (struct fast_task_info *)
+        (pCharEnd - g_free_queue.block_size);
+	for (p=(char *)mpool->blocks; p<(char *)mpool->last_block;
+            p += g_free_queue.block_size)
 	{
 		pTask = (struct fast_task_info *)p;
 		pTask->next = (struct fast_task_info *)(p + g_free_queue.block_size);
@@ -123,9 +137,10 @@ static struct mpool_node *malloc_mpool(const int total_alloc_size)
 	return mpool;
 }
 
-int free_queue_init_ex(const int max_connections, const int init_connections,
+int free_queue_init_ex2(const int max_connections, const int init_connections,
         const int alloc_task_once, const int min_buff_size,
-        const int max_buff_size, const int arg_size)
+        const int max_buff_size, const int arg_size,
+        TaskInitCallback init_callback)
 {
 #define MAX_DATA_SIZE  (256 * 1024 * 1024)
 	int64_t total_size;
@@ -183,8 +198,8 @@ int free_queue_init_ex(const int max_connections, const int init_connections,
 			}
 		}
 
-		if (max_data_size >= (int64_t)(g_free_queue.block_size + aligned_min_size) *
-			(int64_t)init_connections)
+		if (max_data_size >= (int64_t)(g_free_queue.block_size +
+                    aligned_min_size) * (int64_t)init_connections)
 		{
 			total_size = alloc_size + (int64_t)aligned_min_size *
 					init_connections;
@@ -217,6 +232,7 @@ int free_queue_init_ex(const int max_connections, const int init_connections,
 	g_free_queue.min_buff_size = aligned_min_size;
 	g_free_queue.max_buff_size = aligned_max_size;
 	g_free_queue.arg_size = aligned_arg_size;
+	g_free_queue.init_callback = init_callback;
 
 	logDebug("file: "__FILE__", line: %d, "
 		"max_connections: %d, init_connections: %d, alloc_task_once: %d, "
@@ -288,13 +304,6 @@ int free_queue_init_ex(const int max_connections, const int init_connections,
 	}
 
 	return 0;
-}
-
-int free_queue_init(const int max_connections, const int min_buff_size,
-		const int max_buff_size, const int arg_size)
-{
-    return free_queue_init_ex(max_connections, max_connections,
-        0, min_buff_size, max_buff_size, arg_size);
 }
 
 void free_queue_destroy()
@@ -454,15 +463,10 @@ static int _realloc_buffer(struct fast_task_info *pTask, const int new_size,
         const bool copy_data)
 {
 	char *new_buff;
-    new_buff = (char *)malloc(new_size);
+    new_buff = (char *)fc_malloc(new_size);
     if (new_buff == NULL)
     {
-        logError("file: "__FILE__", line: %d, "
-                "malloc %d bytes fail, "
-                "errno: %d, error info: %s",
-                __LINE__, new_size,
-                errno, STRERROR(errno));
-        return errno != 0 ? errno : ENOMEM;
+        return ENOMEM;
     }
     else
     {
@@ -538,6 +542,17 @@ int free_queue_realloc_buffer(struct fast_task_info *pTask,
     return task_queue_realloc_buffer(&g_free_queue, pTask, expect_size);
 }
 
+int free_queue_set_max_buffer_size(struct fast_task_info *pTask)
+{
+    return task_queue_set_buffer_size(&g_free_queue, pTask,
+            g_free_queue.max_buff_size);
+}
+
+int free_queue_realloc_max_buffer(struct fast_task_info *pTask)
+{
+    return task_queue_realloc_buffer(&g_free_queue, pTask,
+            g_free_queue.max_buff_size);
+}
 int task_queue_push(struct fast_task_queue *pQueue, \
 		struct fast_task_info *pTask)
 {
@@ -716,4 +731,3 @@ int task_queue_realloc_buffer(struct fast_task_queue *pQueue,
 
     return _realloc_buffer(pTask, new_size, true);
 }
-

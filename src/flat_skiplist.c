@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2015 Happy Fish / YuQing
-*
-* libfastcommon may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 //flat_skiplist.c
 
@@ -15,12 +22,15 @@
 #include <errno.h>
 #include <assert.h>
 #include "logger.h"
+#include "fc_memory.h"
 #include "flat_skiplist.h"
 
 int flat_skiplist_init_ex(FlatSkiplist *sl, const int level_count,
         skiplist_compare_func compare_func, skiplist_free_func free_func,
         const int min_alloc_elements_once)
 {
+    const int64_t alloc_elements_limit = 0;
+    char name[64];
     int bytes;
     int element_size;
     int i;
@@ -43,21 +53,15 @@ int flat_skiplist_init_ex(FlatSkiplist *sl, const int level_count,
     }
 
     bytes = sizeof(FlatSkiplistNode *) * level_count;
-    sl->tmp_previous = (FlatSkiplistNode **)malloc(bytes);
+    sl->tmp_previous = (FlatSkiplistNode **)fc_malloc(bytes);
     if (sl->tmp_previous == NULL) {
-        logError("file: "__FILE__", line: %d, "
-                "malloc %d bytes fail, errno: %d, error info: %s",
-                __LINE__, bytes, errno, STRERROR(errno));
-        return errno != 0 ? errno : ENOMEM;
+        return ENOMEM;
     }
 
     bytes = sizeof(struct fast_mblock_man) * level_count;
-    sl->mblocks = (struct fast_mblock_man *)malloc(bytes);
+    sl->mblocks = (struct fast_mblock_man *)fc_malloc(bytes);
     if (sl->mblocks == NULL) {
-        logError("file: "__FILE__", line: %d, "
-                "malloc %d bytes fail, errno: %d, error info: %s",
-                __LINE__, bytes, errno, STRERROR(errno));
-        return errno != 0 ? errno : ENOMEM;
+        return ENOMEM;
     }
     memset(sl->mblocks, 0, bytes);
 
@@ -70,9 +74,12 @@ int flat_skiplist_init_ex(FlatSkiplist *sl, const int level_count,
     }
 
     for (i=level_count-1; i>=0; i--) {
-        element_size = sizeof(FlatSkiplistNode) + sizeof(FlatSkiplistNode *) * (i + 1);
-        if ((result=fast_mblock_init_ex(sl->mblocks + i,
-            element_size, alloc_elements_once, NULL, false)) != 0)
+        sprintf(name, "flat-sl-level%02d", i);
+        element_size = sizeof(FlatSkiplistNode) +
+            sizeof(FlatSkiplistNode *) * (i + 1);
+        if ((result=fast_mblock_init_ex1(sl->mblocks + i, name,
+            element_size, alloc_elements_once, alloc_elements_limit,
+            NULL, NULL, false)) != 0)
         {
             return result;
         }
@@ -361,6 +368,16 @@ int flat_skiplist_find_all(FlatSkiplist *sl, void *data, FlatSkiplistIterator *i
     iterator->top = previous;
     iterator->current = last->prev;
     return 0;
+}
+
+void *flat_skiplist_find_ge(FlatSkiplist *sl, void *data)
+{
+    FlatSkiplistNode *node;
+    node = flat_skiplist_get_first_larger_or_equal(sl, data);
+    if (node == sl->top) {
+        return NULL;
+    }
+    return node->data;
 }
 
 int flat_skiplist_find_range(FlatSkiplist *sl, void *start_data, void *end_data,

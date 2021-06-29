@@ -1,4 +1,106 @@
 
+Version 1.53  2021-06-26
+  * process_action support action status
+
+Version 1.52  2021-06-08
+  * process_stop more gracefully (kill -9 on timeout)
+  * add function fc_queue_pop_to_queue_ex
+  * add function get_path_block_size and get_device_block_size
+  * add function fc_check_realloc_iovec_array
+
+Version 1.51  2021-05-27
+  * fast_mblock.[hc]: support batch alloc and batch free
+  * uniq_skiplist.[hc]: init function add parameter: allocator_use_lock
+  * add function normalize_path_ex and normalize_uri
+  * use libcurl to fetch URL resource
+  * add function get_kernel_version
+
+Version 1.50  2021-05-11
+  * add function is_digital_string
+  * add function fc_server_load_from_ini_context
+  * set thread name as necessary
+  * add macro fc_fallocate
+
+Version 1.49  2021-04-17
+  * add macros: FC_ABS and FC_NEGATIVE
+  * uniq_skiplist.c: add uniq_skiplist_pair struct and init function
+  * add functions: fc_mkdirs and str_replace
+  * add FilenameString type and macro
+  * add functions: fc_string_case_compare, fc_string_case_equal etc.
+  * add function: fc_check_filename_ex
+  * add functions: fc_queue_push_queue_to_tail etc.
+  * add file locked_list.h
+  * parse_bytes function more graceful
+
+Version 1.48  2021-02-01
+  * fast_buffer.[hc]: add function fast_buffer_append_binary
+  * fc_check_mkdir_ex return 0 when mkdir with errno EEXIST
+  * add function common_blocked_queue_timedpop
+  * add function fc_queue_timedpop
+
+Version 1.47  2021-01-20
+  * fc_atomic.h: add FC_ATOMIC_GET and FC_ATOMIC_SET etc.
+  * fast_mblock.[hc]: support wait with element limit
+
+Version 1.46  2020-12-29
+  * add function get_time_item_from_conf_ex
+  * INI_FIND_ITEM just break instead of return
+
+Version 1.45  2020-12-24
+  * add function uniq_skiplist_find_node_ex
+  * use readdir instead of readdir_r in Linux
+
+Version 1.44  2020-12-06
+  * add test file src/tests/test_pthread_lock.c
+  * add uniq_skiplist.[hc]
+  * add function split_string_ex
+  * fast_mblock.[hc]: add init_args for init_func
+  * struct fast_task_info add field: nio_stage
+  * add function fc_memrchr
+  * add function is_network_error
+  * add function fast_mpool_log_stats
+  * add files: server_id_func.[hc]
+  * common_blocked_queue support pop all nodes
+  * shared_func.[hc]: add functions fc_floor_prime and fc_ceil_prime
+  * fast_mpool.[hc]: change function fast_mpool_strdup
+  * fast_allocator.[hc]: add function fast_allocator_strdup
+  * shared_func.[hc]: add function getFileSize
+  * char_converter.[hc]: add function fast_char_unescape
+  * struct fast_task_info add ctx pointer for libserverframe nio
+  * struct thread_data add waiting_queue for Linux eventfd notify
+  * struct fast_task_info add canceled field for complicated thread model
+  * nio_thread_data support thread notify
+  * pthread_func.[hc] add functions: create_work_threads_ex and fc_create_thread
+  * sched_add_entries use temp ScheduleArray for rare case
+  * add function common_blocked_queue_return_nodes
+  * add functions getIpAndPort and getPeerIpAndPort 
+  * bugfixed: call fast_mblock_destroy in common_blocked_queue_destroy
+  * add function fc_get_file_line_count_ex
+  * uniq_skiplist add function find_ge and support bidirection
+  * connection_pool support validate connection on error
+  * fast_task_queue.[hc]: free_queue support init_callback
+  * ini_file_reader.c: use mutex lock when access dynamic content array
+  * uniq_skiplist add function uniq_skiplist_replace_ex
+  * add files: fc_queue.[hc]
+  * add files: fc_memory.[hc]
+  * add files: shared_buffer.[hc]
+  * add files: thread_pool.[hc]
+  * shared_func.[hc]: add function fc_path_contains
+  * fast_mblock.[hc]: support alloc elements limit
+  * sockopt.[hc]: add function asyncconnectserverbyip
+  * add locked_timer.[hc]: time wheel timer with lock
+  * tcp_quick_ack option for Linux
+
+Version 1.43  2019-12-25
+  * replace function call system to getExecResult,
+    system is the deprecated function in iOS 11
+  * correct function skiplist_iterator in skiplist.h
+  * add buffered_file_writer.[hc]
+  * add function fc_delete_file_ex
+
+Version 1.42  2019-12-03
+  * add function get_gzip_command_filename
+  * function create_work_threads changed
 
 Version 1.41  2019-09-30
   * change CIDR network_bits range from [16, 32) to [10, 32)

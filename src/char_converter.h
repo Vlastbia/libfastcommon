@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 //char_converter.h
 #ifndef CHAR_CONVERTER_H
@@ -23,6 +30,9 @@ extern "C" {
 #define FAST_CHAR_OP_NONE           0
 #define FAST_CHAR_OP_ADD_BACKSLASH  1
 #define FAST_CHAR_OP_NO_BACKSLASH   2
+
+#define FAST_CHAR_MAKE_PAIR(pair, from, to) \
+    pair.src = from; pair.dest = to
 
 typedef struct fast_char_pair
 {
@@ -47,6 +57,11 @@ typedef struct fast_char_converter
      * char table to convert
      * */
     FastCharTarget char_table[FAST_MAX_CHAR_COUNT];
+
+    /*
+     * char table to unescape
+     * */
+    FastCharTarget unescape_chars[FAST_MAX_CHAR_COUNT];
 } FastCharConverter;
 
 /**
@@ -132,6 +147,21 @@ void char_converter_set_pair_ex(FastCharConverter *pCharConverter,
 int fast_char_convert(FastCharConverter *pCharConverter,
         const char *input, const int input_len,
         char *output, int *out_len, const int out_size);
+
+#define fast_char_escape(pCharConverter, input, input_len, \
+        output, out_len, out_size)   \
+        fast_char_convert(pCharConverter, input, input_len, \
+        output, out_len, out_size)
+
+/**
+ *  char unescape function
+ *  parameters:
+ *           pCharConverter: the char converter
+ *           str: the string to unescape
+ *           len: the input string length and store the unscaped string length
+ *  return: converted char count
+*/
+int fast_char_unescape(FastCharConverter *pCharConverter, char *str, int *len);
 
 #ifdef __cplusplus
 }

@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2015 Happy Fish / YuQing
-*
-* libfastcommon may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 //multi_skiplist.c
 
@@ -15,6 +22,7 @@
 #include <errno.h>
 #include <assert.h>
 #include "logger.h"
+#include "fc_memory.h"
 #include "multi_skiplist.h"
 
 int multi_skiplist_init_ex(MultiSkiplist *sl, const int level_count,
@@ -22,6 +30,8 @@ int multi_skiplist_init_ex(MultiSkiplist *sl, const int level_count,
         skiplist_free_func free_func,
         const int min_alloc_elements_once)
 {
+    const int64_t alloc_elements_limit = 0;
+    char name[64];
     int bytes;
     int element_size;
     int i;
@@ -44,21 +54,15 @@ int multi_skiplist_init_ex(MultiSkiplist *sl, const int level_count,
     }
 
     bytes = sizeof(MultiSkiplistNode *) * level_count;
-    sl->tmp_previous = (MultiSkiplistNode **)malloc(bytes);
+    sl->tmp_previous = (MultiSkiplistNode **)fc_malloc(bytes);
     if (sl->tmp_previous == NULL) {
-        logError("file: "__FILE__", line: %d, "
-                "malloc %d bytes fail, errno: %d, error info: %s",
-                __LINE__, bytes, errno, STRERROR(errno));
-        return errno != 0 ? errno : ENOMEM;
+        return ENOMEM;
     }
 
     bytes = sizeof(struct fast_mblock_man) * level_count;
-    sl->mblocks = (struct fast_mblock_man *)malloc(bytes);
+    sl->mblocks = (struct fast_mblock_man *)fc_malloc(bytes);
     if (sl->mblocks == NULL) {
-        logError("file: "__FILE__", line: %d, "
-                "malloc %d bytes fail, errno: %d, error info: %s",
-                __LINE__, bytes, errno, STRERROR(errno));
-        return errno != 0 ? errno : ENOMEM;
+        return ENOMEM;
     }
     memset(sl->mblocks, 0, bytes);
 
@@ -71,9 +75,12 @@ int multi_skiplist_init_ex(MultiSkiplist *sl, const int level_count,
     }
 
     for (i=level_count-1; i>=0; i--) {
-        element_size = sizeof(MultiSkiplistNode) + sizeof(MultiSkiplistNode *) * (i + 1);
-        if ((result=fast_mblock_init_ex(sl->mblocks + i,
-            element_size, alloc_elements_once, NULL, false)) != 0)
+        sprintf(name, "multi-sl-level%02d", i);
+        element_size = sizeof(MultiSkiplistNode) +
+            sizeof(MultiSkiplistNode *) * (i + 1);
+        if ((result=fast_mblock_init_ex1(sl->mblocks + i, name,
+            element_size, alloc_elements_once, alloc_elements_limit,
+            NULL, NULL, false)) != 0)
         {
             return result;
         }
@@ -96,9 +103,9 @@ int multi_skiplist_init_ex(MultiSkiplist *sl, const int level_count,
     }
     memset(sl->tail, 0, sl->mblocks[0].info.element_size);
 
-    if ((result=fast_mblock_init_ex(&sl->data_mblock,
+    if ((result=fast_mblock_init_ex1(&sl->data_mblock, "multi-sl-data",
                     sizeof(MultiSkiplistData), alloc_elements_once,
-                    NULL, false)) != 0)
+                    alloc_elements_limit, NULL, NULL, false)) != 0)
     {
         return result;
     }
@@ -403,6 +410,16 @@ int multi_skiplist_find_all(MultiSkiplist *sl, void *data,
         iterator->current.data = iterator->current.node->head;
         return 0;
     }
+}
+
+void *multi_skiplist_find_ge(MultiSkiplist *sl, void *data)
+{
+    MultiSkiplistNode *node;
+    node = multi_skiplist_get_first_larger_or_equal(sl, data);
+    if (node == sl->tail) {
+        return NULL;
+    }
+    return node->head->data;
 }
 
 int multi_skiplist_find_range(MultiSkiplist *sl, void *start_data, void *end_data,

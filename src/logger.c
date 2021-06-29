@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #include <limits.h>
 #include <stdarg.h>
@@ -92,6 +99,7 @@ int log_init_ex(LogContext *pContext)
 	pContext->log_level = LOG_INFO;
 	pContext->log_fd = STDERR_FILENO;
 	pContext->time_precision = LOG_TIME_PRECISION_SECOND;
+    pContext->compress_log_days_before = 1;
  	strcpy(pContext->rotate_time_format, "%Y%m%d_%H%M%S");
 
 	pContext->log_buff = (char *)malloc(LOG_BUFF_SIZE);
@@ -302,7 +310,14 @@ void log_set_compress_log_flags_ex(LogContext *pContext, const short flags)
 
 void log_set_compress_log_days_before_ex(LogContext *pContext, const int days_before)
 {
-    pContext->compress_log_days_before = days_before;
+    if (days_before > 0)
+    {
+        pContext->compress_log_days_before = days_before;
+    }
+    else
+    {
+        pContext->compress_log_days_before = 1;
+    }
 }
 
 void log_set_fd_flags(LogContext *pContext, const int flags)
@@ -372,6 +387,10 @@ static int log_delete_old_file(LogContext *pContext,
             fprintf(stderr, "file: "__FILE__", line: %d, " \
                     "unlink %s fail, errno: %d, error info: %s\n", \
                     __LINE__, full_filename, errno, STRERROR(errno));
+        }
+        else if (NEED_COMPRESS_LOG(pContext->compress_log_flags))
+        {
+            unlink(old_filename);
         }
         return errno != 0 ? errno : EPERM;
     }
@@ -514,7 +533,9 @@ static int log_get_matched_files(LogContext *pContext,
     char *log_filename;
     char *filename;
     DIR *dir;
+#ifndef OS_LINUX
     struct dirent ent;
+#endif
     struct dirent *pEntry;
     time_t the_time;
 	struct tm tm;
@@ -560,7 +581,12 @@ static int log_get_matched_files(LogContext *pContext,
     strftime(filename_prefix + len, sizeof(filename_prefix) - len,
             rotate_time_format_prefix, &tm);
     prefix_filename_len = strlen(filename_prefix);
+
+#ifndef OS_LINUX
     while (readdir_r(dir, &ent, &pEntry) == 0)
+#else
+    while ((pEntry=readdir(dir)) != NULL)
+#endif
     {
         if (pEntry == NULL)
         {
@@ -686,31 +712,19 @@ int log_delete_old_files(void *args)
     }
 }
 
-static void* log_gzip_func(void *args)
+static void *log_gzip_func(void *args)
 {
     LogContext *pContext;
-    char *gzip;
     char cmd[MAX_PATH_SIZE + 128];
     struct log_filename_array filename_array;
     char log_filepath[MAX_PATH_SIZE];
     char full_filename[MAX_PATH_SIZE + 32];
+    char output[512];
     int prefix_len;
+    int result;
     int i;
 
     pContext = (LogContext *)args;
-    if (access("/bin/gzip", F_OK) == 0)
-    {
-        gzip = "/bin/gzip";
-    }
-    else if (access("/usr/bin/gzip", F_OK) == 0)
-    {
-        gzip = "/usr/bin/gzip";
-    }
-    else
-    {
-        gzip = "gzip";
-    }
-
     if (log_get_prefix_len(pContext, &prefix_len) != 0)
     {
         return NULL;
@@ -735,11 +749,24 @@ static void* log_gzip_func(void *args)
 
         snprintf(full_filename, sizeof(full_filename), "%s%s",
                 log_filepath, filename_array.filenames[i]);
-        snprintf(cmd, sizeof(cmd), "%s %s", gzip, full_filename);
-        if (system(cmd) == -1)
-	{
-		fprintf(stderr, "execute %s fail\n", cmd);
-	}
+        snprintf(cmd, sizeof(cmd), "%s %s",
+                get_gzip_command_filename(), full_filename);
+
+        result = getExecResult(cmd, output, sizeof(output));
+        if (result != 0)
+        {
+            fprintf(stderr, "file: "__FILE__", line: %d, "
+                    "exec command \"%s\" fail, "
+                    "errno: %d, error info: %s",
+                    __LINE__, cmd, result, STRERROR(result));
+            break;
+        }
+        if (*output != '\0')
+        {
+            fprintf(stderr, "file: "__FILE__", line: %d, "
+                    "exec command \"%s\", output: %s",
+                    __LINE__, cmd, output);
+        }
     }
 
     log_free_filename_array(&filename_array);
@@ -790,8 +817,7 @@ int log_rotate(LogContext *pContext)
 
 	close(pContext->log_fd);
 
-	current_time = get_current_time();
-	localtime_r(&current_time, &tm);
+    current_time = get_current_time();
     if (tm.tm_hour == 0 && tm.tm_min <= 1)
     {
         if (strstr(pContext->rotate_time_format, "%H") == NULL
@@ -799,9 +825,9 @@ int log_rotate(LogContext *pContext)
                 && strstr(pContext->rotate_time_format, "%S") == NULL)
         {
             current_time -= 120;
-            localtime_r(&current_time, &tm);
         }
     }
+    localtime_r(&current_time, &tm);
 
     memset(old_filename, 0, sizeof(old_filename));
 	len = sprintf(old_filename, "%s.", pContext->log_filename);

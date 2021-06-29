@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #ifndef _SCHED_THREAD_H_
 #define _SCHED_THREAD_H_
@@ -15,6 +22,7 @@
 #include "common_define.h"
 #include "fast_timer.h"
 #include "fast_mblock.h"
+#include "fc_queue.h"
 
 typedef int (*TaskFunc) (void *args);
 
@@ -60,52 +68,56 @@ typedef struct fast_delay_task {
 
 typedef struct
 {
-    FastDelayTask *head;
-    FastDelayTask *tail;
-    pthread_mutex_t lock;
-} FastDelayQueue;
-
-typedef struct
-{
 	ScheduleArray scheduleArray;
 	ScheduleEntry *head;  //schedule chain head
     ScheduleEntry *tail;  //schedule chain tail
 
-    struct fast_mblock_man mblock;  //for timer entry
+    struct fast_mblock_man delay_task_allocator;  //for FastDelayTask
     FastTimer timer;   //for delay task
     bool timer_init;
-    FastDelayQueue delay_queue;
+    struct fc_queue delay_queue;
+    pthread_mutex_t lock;
 
 	bool *pcontinue_flag;
 } ScheduleContext;
 
-#define INIT_SCHEDULE_ENTRY(schedule_entry, _id, _hour, _minute, _second, \
-	_interval,  _task_func, _func_args) \
+#define INIT_SCHEDULE_ENTRY1(schedule_entry, _id, _hour, _minute, _second, \
+	_interval,  _task_func, _func_args, _new_thread) \
 	(schedule_entry).id = _id; \
 	(schedule_entry).time_base.hour = _hour;     \
 	(schedule_entry).time_base.minute = _minute; \
 	(schedule_entry).time_base.second = _second; \
 	(schedule_entry).interval = _interval;   \
 	(schedule_entry).task_func = _task_func; \
-	(schedule_entry).new_thread = false;     \
-	(schedule_entry).func_args = _func_args
+	(schedule_entry).func_args = _func_args; \
+	(schedule_entry).new_thread = _new_thread
 
-#define INIT_SCHEDULE_ENTRY_EX(schedule_entry, _id, _time_base, \
-	_interval,  _task_func, _func_args) \
+#define INIT_SCHEDULE_ENTRY_EX1(schedule_entry, _id, _time_base, \
+	_interval,  _task_func, _func_args, _new_thread) \
 	(schedule_entry).id = _id; \
 	(schedule_entry).time_base = _time_base; \
 	(schedule_entry).interval = _interval;   \
 	(schedule_entry).task_func = _task_func; \
-	(schedule_entry).new_thread = false;     \
-	(schedule_entry).func_args = _func_args
+	(schedule_entry).func_args = _func_args; \
+	(schedule_entry).new_thread = _new_thread
+
+#define INIT_SCHEDULE_ENTRY(schedule_entry, _id, _hour, _minute, _second, \
+        _interval,  _task_func, _func_args)  \
+        INIT_SCHEDULE_ENTRY1(schedule_entry, _id, _hour, _minute, _second, \
+                _interval,  _task_func, _func_args, false)
+
+#define INIT_SCHEDULE_ENTRY_EX(schedule_entry, _id, _time_base, \
+        _interval,  _task_func, _func_args) \
+        INIT_SCHEDULE_ENTRY_EX1(schedule_entry, _id, _time_base, \
+                _interval,  _task_func, _func_args, false)
+
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-extern volatile bool g_schedule_flag; //schedule continue running flag
+extern volatile int g_schedule_flag; //schedule continue running flag
 extern volatile time_t g_current_time;  //the current time
-
 
 #define get_current_time() (g_schedule_flag ? g_current_time: time(NULL))
 
@@ -155,18 +167,26 @@ int sched_add_delay_task_ex(ScheduleContext *pContext, TaskFunc task_func,
 int sched_add_delay_task(TaskFunc task_func, void *func_args,
         const int delay_seconds, const bool new_thread);
 
+
+/** init the schedule context
+ *  parameters:
+ *  	     pContext: store the ScheduleContext pointer
+ * return: error no, 0 for success, != 0 fail
+*/
+int sched_thread_init_ex(ScheduleContext **ppContext);
+
 /** execute the schedule thread
  *  parameters:
  *  	     pScheduleArray: the schedule tasks
  *  	     ptid: store the schedule thread id
  *  	     stack_size: set thread stack size (byes)
  *  	     pcontinue_flag: main process continue running flag
- *  	     ppContext: store the ScheduleContext pointer 
+ *  	     pContext: the ScheduleContext pointer
  * return: error no, 0 for success, != 0 fail
 */
 int sched_start_ex(ScheduleArray *pScheduleArray, pthread_t *ptid,
 		const int stack_size, bool * volatile pcontinue_flag,
-        ScheduleContext **ppContext);
+        ScheduleContext *pContext);
 
 int sched_start(ScheduleArray *pScheduleArray, pthread_t *ptid, \
 		const int stack_size, bool * volatile pcontinue_flag);

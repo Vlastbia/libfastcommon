@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #ifndef __FAST_BUFFER_H__
 #define __FAST_BUFFER_H__
 
@@ -41,11 +56,35 @@ static inline void fast_buffer_reset(FastBuffer *buffer)
 
 void fast_buffer_destroy(FastBuffer *buffer);
 
-int fast_buffer_check(FastBuffer *buffer, const int inc_len);
+#define fast_buffer_check(buffer, inc_len) \
+    fast_buffer_check_inc_size(buffer, inc_len)
+
+int fast_buffer_set_capacity(FastBuffer *buffer, const int capacity);
+
+static inline int fast_buffer_check_capacity(FastBuffer *buffer,
+        const int capacity)
+{
+    if (buffer->alloc_size >= capacity)
+    {
+        return 0;
+    }
+
+    return fast_buffer_set_capacity(buffer, capacity);
+}
+
+static inline int fast_buffer_check_inc_size(FastBuffer *buffer,
+        const int inc_size)
+{
+    return fast_buffer_check_capacity(buffer, buffer->length + inc_size);
+}
 
 int fast_buffer_append(FastBuffer *buffer, const char *format, ...);
 
-int fast_buffer_append_buff(FastBuffer *buffer, const char *data, const int len);
+int fast_buffer_append_buff(FastBuffer *buffer,
+        const char *data, const int len);
+
+int fast_buffer_append_binary(FastBuffer *buffer,
+        const void *data, const int len);
 
 int fast_buffer_append_int(FastBuffer *buffer, const int n);
 
@@ -73,4 +112,3 @@ static inline int fast_buffer_append_buffer(FastBuffer *buffer, FastBuffer *src)
 #endif
 
 #endif
-

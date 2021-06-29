@@ -25,7 +25,6 @@ fc_list_add (struct fc_list_head *_new, struct fc_list_head *head)
 	_new->next->prev = _new;
 }
 
-
 static inline void
 fc_list_add_tail (struct fc_list_head *_new, struct fc_list_head *head)
 {
@@ -37,7 +36,17 @@ fc_list_add_tail (struct fc_list_head *_new, struct fc_list_head *head)
 }
 
 static inline void
-fc_list_add_internal(struct fc_list_head *_new, struct fc_list_head *prev,
+fc_list_add_before (struct fc_list_head *_new, struct fc_list_head *current)
+{
+	_new->prev = current->prev;
+	_new->next = current;
+
+	_new->prev->next = _new;
+	_new->next->prev = _new;
+}
+
+static inline void
+fc_list_add_internal (struct fc_list_head *_new, struct fc_list_head *prev,
         struct fc_list_head *next)
 {
     next->prev = _new;
@@ -145,6 +154,15 @@ static inline int fc_list_count(struct fc_list_head *head)
 
 #define fc_list_entry(ptr, type, member)					\
 	((type *)((char *)(ptr)-(unsigned long)(&((type *)0)->member)))
+
+
+#define fc_list_first_entry(head, type, member)	\
+    ((head)->next == head ? NULL : \
+     fc_list_entry((head)->next, type, member))
+
+#define fc_list_last_entry(head, type, member)	\
+    ((head)->prev == head ? NULL : \
+     fc_list_entry((head)->prev, type, member))
 
 
 #define fc_list_for_each(pos, head)				     \

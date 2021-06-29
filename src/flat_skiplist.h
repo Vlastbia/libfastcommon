@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2015 Happy Fish / YuQing
-*
-* libfastcommon may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 //flat_skiplist.h, support duplicated entries, and support stable sort  :)
 //you should use multi_skiplist with too many duplicated entries
@@ -64,6 +71,7 @@ void *flat_skiplist_find(FlatSkiplist *sl, void *data);
 int flat_skiplist_find_all(FlatSkiplist *sl, void *data, FlatSkiplistIterator *iterator);
 int flat_skiplist_find_range(FlatSkiplist *sl, void *start_data, void *end_data,
         FlatSkiplistIterator *iterator);
+void *flat_skiplist_find_ge(FlatSkiplist *sl, void *data);
 
 static inline void flat_skiplist_iterator(FlatSkiplist *sl, FlatSkiplistIterator *iterator)
 {
@@ -82,6 +90,15 @@ static inline void *flat_skiplist_next(FlatSkiplistIterator *iterator)
     data = iterator->current->data;
     iterator->current = iterator->current->prev;
     return data;
+}
+
+static inline void *flat_skiplist_get_first(FlatSkiplist *sl)
+{
+    if (sl->top->links[0] != sl->tail) {
+        return sl->top->links[0]->data;
+    } else {
+        return NULL;
+    }
 }
 
 static inline bool flat_skiplist_empty(FlatSkiplist *sl)

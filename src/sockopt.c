@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 //socketopt.c
 #include "common_define.h"
@@ -13,12 +20,18 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netinet/tcp.h>
 #include <netdb.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+
+#define SUB_NET_TYPE_INNER_10_STR2  "inner_10"
+#define SUB_NET_TYPE_INNER_172_STR2 "inner_172"
+#define SUB_NET_TYPE_INNER_192_STR2 "inner_192"
+
+#define SUB_NET_TYPE_INNER_10_STR3  "inner10"
+#define SUB_NET_TYPE_INNER_172_STR3 "inner172"
+#define SUB_NET_TYPE_INNER_192_STR3 "inner192"
+
 
 #if defined(OS_LINUX) || defined(OS_FREEBSD)
 #include <ifaddrs.h>
@@ -70,11 +83,22 @@
 #endif
 #endif
 
+#ifdef OS_LINUX
+    bool g_tcp_quick_ack = false;
+#endif
+
 static bool try_again_when_interrupt = true;
 
 void tcp_set_try_again_when_interrupt(const bool value)
 {
     try_again_when_interrupt = value;
+}
+
+void tcp_set_quick_ack(const bool value)
+{
+#ifdef OS_LINUX
+    g_tcp_quick_ack = value;
+#endif
 }
 
 int tcpgets(int sock, char* s, const int size, const int timeout)
@@ -161,11 +185,11 @@ int tcprecvdata_ex(int sock, void *data, const int size, \
 		}
 #else
 		res = poll(&pollfds, 1, 1000 * timeout);
-		if (pollfds.revents & POLLHUP)
-		{
-			ret_code = ENOTCONN;
-			break;
-		}
+		if (res > 0 && (pollfds.revents & (POLLHUP | POLLERR)))
+        {
+            ret_code = ENOTCONN;
+            break;
+        }
 #endif
 
 		if (res < 0)
@@ -199,14 +223,15 @@ int tcprecvdata_ex(int sock, void *data, const int size, \
 			break;
 		}
 
+        TCP_SET_QUICK_ACK(sock);
 		left_bytes -= read_bytes;
 		p += read_bytes;
 	}
 
 	if (count != NULL)
-	{
-		*count = size - left_bytes;
-	}
+    {
+        *count = size - left_bytes;
+    }
 
 	return ret_code;
 }
@@ -249,7 +274,7 @@ int tcpsenddata(int sock, void* data, const int size, const int timeout)
 		}
 #else
 		result = poll(&pollfds, 1, 1000 * timeout);
-		if (pollfds.revents & POLLHUP)
+		if (result > 0 && (pollfds.revents & (POLLHUP | POLLERR)))
 		{
 			return ENOTCONN;
 		}
@@ -323,6 +348,7 @@ int tcprecvdata_nb_ms(int sock, void *data, const int size, \
 		read_bytes = recv(sock, p, left_bytes, 0);
 		if (read_bytes > 0)
 		{
+            TCP_SET_QUICK_ACK(sock);
 			left_bytes -= read_bytes;
 			p += read_bytes;
 			continue;
@@ -355,7 +381,7 @@ int tcprecvdata_nb_ms(int sock, void *data, const int size, \
 		}
 #else
 		res = poll(&pollfds, 1, timeout_ms);
-		if (pollfds.revents & POLLHUP)
+		if (res > 0 && (pollfds.revents & (POLLHUP | POLLERR)))
 		{
 			ret_code = ENOTCONN;
 			break;
@@ -439,7 +465,7 @@ int tcpsenddata_nb(int sock, void* data, const int size, const int timeout)
 		}
 #else
 		result = poll(&pollfds, 1, 1000 * timeout);
-		if (pollfds.revents & POLLHUP)
+		if (result > 0 && (pollfds.revents & (POLLHUP | POLLERR)))
 		{
 			return ENOTCONN;
 		}
@@ -462,7 +488,7 @@ int tcpsenddata_nb(int sock, void* data, const int size, const int timeout)
 	return 0;
 }
 
-int setsockaddrbyip(const char *ip, const short port, sockaddr_convert_t *convert)
+int setsockaddrbyip(const char *ip, const uint16_t port, sockaddr_convert_t *convert)
 {
     int af;
     void *dest;
@@ -496,7 +522,7 @@ int setsockaddrbyip(const char *ip, const short port, sockaddr_convert_t *conver
     return 0;
 }
 
-int connectserverbyip(int sock, const char *server_ip, const short server_port)
+int connectserverbyip(int sock, const char *server_ip, const uint16_t server_port)
 {
     int result;
     sockaddr_convert_t convert;
@@ -515,7 +541,7 @@ int connectserverbyip(int sock, const char *server_ip, const short server_port)
 }
 
 int connectserverbyip_nb_ex(int sock, const char *server_ip, \
-		const short server_port, const int timeout, \
+		const uint16_t server_port, const int timeout, \
 		const bool auto_detect)
 {
 	int result;
@@ -626,15 +652,34 @@ int connectserverbyip_nb_ex(int sock, const char *server_ip, \
 	return result;
 }
 
+int asyncconnectserverbyip(int sock, const char *server_ip,
+        const uint16_t server_port)
+{
+    int result;
+    sockaddr_convert_t convert;
+
+    if ((result=setsockaddrbyip(server_ip, server_port, &convert)) != 0)
+    {
+        return result;
+    }
+
+    if (connect(sock, &convert.sa.addr, convert.len) == 0) {
+        return 0;
+    }
+    else
+    {
+        return errno != 0 ? errno : EINPROGRESS;
+    }
+}
+
 int socketCreateEx2(int af, const char *server_ip,
-		const int timeout, const int flags,
-        const char *bind_ipaddr, int *err_no)
+		const int flags, const char *bind_ipaddr, int *err_no)
 {
     int sock;
 
-    if (af == AF_UNSPEC)
+    if (!(af == AF_INET || af == AF_INET6))
     {
-        af = is_ipv6_addr(server_ip) ?  AF_INET6 : AF_INET;
+        af = is_ipv6_addr(server_ip) ? AF_INET6 : AF_INET;
     }
 
     sock = socket(af, SOCK_STREAM, 0);
@@ -673,14 +718,14 @@ int socketCreateEx2(int af, const char *server_ip,
 }
 
 int socketClientEx2(int af, const char *server_ip,
-		const short server_port, const int timeout,
+		const uint16_t server_port, const int timeout,
 		const int flags, const char *bind_ipaddr, int *err_no)
 {
     int sock;
     bool auto_detect;
 
     sock = socketCreateEx2(af, server_ip,
-		timeout, flags, bind_ipaddr, err_no);
+            flags, bind_ipaddr, err_no);
     if (sock < 0)
     {
         return sock;
@@ -692,7 +737,7 @@ int socketClientEx2(int af, const char *server_ip,
     if (*err_no != 0)
     {
         logError("file: "__FILE__", line: %d, "
-                "connect to %s:%d fail, "
+                "connect to %s:%u fail, "
                 "errno: %d, error info: %s",
                 __LINE__, server_ip, server_port,
                 *err_no, STRERROR(*err_no));
@@ -757,6 +802,38 @@ in_addr_t getIpaddr(getnamefunc getname, int sock, \
 	}
 	
 	return ((struct sockaddr_in *)&addr)->sin_addr.s_addr;  //DO NOT support IPv6
+}
+
+int getIpAndPort(getnamefunc getname, int sock,
+		char *buff, const int bufferSize, int *port)
+{
+	struct sockaddr addr;
+	socklen_t addrlen;
+
+	memset(&addr, 0, sizeof(addr));
+	addrlen = sizeof(addr);
+
+	if (getname(sock, &addr, &addrlen) != 0)
+	{
+		*buff = '\0';
+		return errno != 0 ? errno : EINVAL;
+	}
+
+	if (addrlen > 0)
+	{
+        fc_inet_ntop(&addr, buff, bufferSize);
+	}
+	else
+	{
+		*buff = '\0';
+	}
+
+    if (addr.sa_family == AF_INET) {
+        *port = ntohs(((struct sockaddr_in *)&addr)->sin_port);
+    } else {
+        *port = ntohs(((struct sockaddr_in6 *)&addr)->sin6_port);
+    }
+	return 0;
 }
 
 char *getHostnameByIp(const char *szIpAddr, char *buff, const int bufferSize)
@@ -1098,7 +1175,7 @@ int tcprecvfile(int sock, const char *filename, const int64_t file_bytes, \
 			recv_bytes = remain_bytes;
 		}
 
-		result = recv_func(sock, buff, recv_bytes, \
+		result = recv_func(sock, buff, recv_bytes,
 				timeout, &count);
 		if (result != 0)
 		{
@@ -1553,9 +1630,6 @@ int tcpsendfile_ex(int sock, const char *filename, const int64_t file_offset, \
 
 int tcpsetserveropt(int fd, const int timeout)
 {
-	int flags;
-	int result;
-
 	struct linger linger;
 	struct timeval waittime;
 
@@ -1598,22 +1672,7 @@ int tcpsetserveropt(int fd, const int timeout)
 			__LINE__, errno, STRERROR(errno));
 	}
 
-	flags = 1;
-	if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, \
-		(char *)&flags, sizeof(flags)) < 0)
-	{
-		logError("file: "__FILE__", line: %d, " \
-			"setsockopt failed, errno: %d, error info: %s", \
-			__LINE__, errno, STRERROR(errno));
-		return errno != 0 ? errno : EINVAL;
-	}
-
-	if ((result=tcpsetkeepalive(fd, 2 * timeout + 1)) != 0)
-	{
-		return result;
-	}
-
-	return 0;
+	return tcpsetnodelay(fd, timeout);
 }
 
 int tcpsetkeepalive(int fd, const int idleSeconds)
@@ -1767,14 +1826,15 @@ int tcpsetnodelay(int fd, const int timeout)
 	}
 
 	flags = 1;
-	if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, \
+	if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
 			(char *)&flags, sizeof(flags)) < 0)
 	{
-		logError("file: "__FILE__", line: %d, " \
-			"setsockopt failed, errno: %d, error info: %s", \
+		logError("file: "__FILE__", line: %d, "
+			"setsockopt failed, errno: %d, error info: %s",
 			__LINE__, errno, STRERROR(errno));
 		return errno != 0 ? errno : EINVAL;
 	}
+    TCP_SET_QUICK_ACK(fd);
 
 	return 0;
 }
@@ -2241,4 +2301,72 @@ int getifconfigs(FastIFConfig *if_configs, const int max_count, int *count)
     return EOPNOTSUPP;
 }
 #endif
+
+int fc_get_net_type_by_ip(const char *ip)
+{
+    int len;
+    if (ip == NULL)
+    {
+        return FC_NET_TYPE_NONE;
+    }
+    len = strlen(ip);
+    if (len < 8)
+    {
+        return (len < 7) ? FC_NET_TYPE_NONE : FC_NET_TYPE_OUTER;
+    }
+
+    if (memcmp(ip, "10.", 3) == 0)
+    {
+        return FC_SUB_NET_TYPE_INNER_10;
+    }
+
+    if (memcmp(ip, "192.168.", 8) == 0)
+    {
+        return FC_SUB_NET_TYPE_INNER_192;
+    }
+
+    if (memcmp(ip, "172.", 4) == 0)
+    {
+        int b;
+        b = atoi(ip + 4);
+        if (b >= 16 && b < 32)
+        {
+            return FC_SUB_NET_TYPE_INNER_172;
+        }
+    }
+
+    return FC_NET_TYPE_OUTER;
+}
+
+int fc_get_net_type_by_name(const char *net_type)
+{
+    if (net_type == NULL || *net_type == '\0') {
+        return FC_NET_TYPE_ANY;
+    }
+
+    if (strcasecmp(net_type, NET_TYPE_ANY_STR) == 0) {
+        return FC_NET_TYPE_ANY;
+    } else if (strcasecmp(net_type, NET_TYPE_OUTER_STR) == 0) {
+        return FC_NET_TYPE_OUTER;
+    } else if (strcasecmp(net_type, NET_TYPE_INNER_STR) == 0) {
+        return FC_NET_TYPE_INNER;
+    } else if (strcasecmp(net_type, SUB_NET_TYPE_INNER_10_STR) == 0 ||
+            strcasecmp(net_type, SUB_NET_TYPE_INNER_10_STR2) == 0 ||
+            strcasecmp(net_type, SUB_NET_TYPE_INNER_10_STR3) == 0)
+    {
+        return FC_SUB_NET_TYPE_INNER_10;
+    } else if (strcasecmp(net_type, SUB_NET_TYPE_INNER_172_STR) == 0 ||
+            strcasecmp(net_type, SUB_NET_TYPE_INNER_172_STR2) == 0 ||
+            strcasecmp(net_type, SUB_NET_TYPE_INNER_172_STR3) == 0)
+    {
+        return FC_SUB_NET_TYPE_INNER_172;
+    } else if (strcasecmp(net_type, SUB_NET_TYPE_INNER_192_STR) == 0 ||
+            strcasecmp(net_type, SUB_NET_TYPE_INNER_192_STR2) == 0 ||
+            strcasecmp(net_type, SUB_NET_TYPE_INNER_192_STR3) == 0)
+    {
+        return FC_SUB_NET_TYPE_INNER_192;
+    } else {
+        return FC_NET_TYPE_NONE;
+    }
+}
 

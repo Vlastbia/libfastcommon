@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 //fast_allocator.c
 
 #include <errno.h>
@@ -25,7 +40,8 @@ static struct fast_allocator_info malloc_allocator;
 		(allocator)->pooled = _pooled;        \
 		acontext->allocator_array.allocators[ \
 			acontext->allocator_array.count++] = allocator; \
-		/* logInfo("count: %d, magic_number: %d", acontext->allocator_array.count, (allocator)->magic_number); */\
+	 /* logInfo("count: %d, magic_number: %d", acontext->allocator_array.count, \
+            (allocator)->magic_number); */  \
 	} while (0)
 
 
@@ -64,36 +80,53 @@ static void fast_allocator_malloc_trunk_notify_func(const int alloc_bytes, void 
 static int allocator_array_check_capacity(struct fast_allocator_context *acontext,
 	const int allocator_count)
 {
-	int result;
 	int bytes;
+    int target_count;
+    int alloc_count;
 	struct fast_allocator_info  **new_allocators;
 
-	if (acontext->allocator_array.alloc >= acontext->allocator_array.count +
-		allocator_count)
+    target_count = acontext->allocator_array.count + allocator_count;
+	if (acontext->allocator_array.alloc >= target_count)
 	{
 		return 0;
 	}
 	if (acontext->allocator_array.alloc == 0)
 	{
-		acontext->allocator_array.alloc = 2 * allocator_count;
+        if (target_count < 128)
+        {
+            alloc_count = 128;
+        }
+        else if (target_count < 256)
+        {
+            alloc_count = 256;
+        }
+        else if (target_count < 512)
+        {
+            alloc_count = 512;
+        }
+        else if (target_count < 1024)
+        {
+            alloc_count = 1024;
+        }
+        else
+        {
+            alloc_count = 2 * target_count;
+        }
 	}
 	else
 	{
+        alloc_count = acontext->allocator_array.alloc;
 		do
 		{
-			acontext->allocator_array.alloc *= 2;
-		} while (acontext->allocator_array.alloc < allocator_count);
+			alloc_count *= 2;
+		} while (alloc_count < target_count);
 	}
 
-	bytes = sizeof(struct fast_allocator_info*) * acontext->allocator_array.alloc;
-	new_allocators = (struct fast_allocator_info **)malloc(bytes);
+	bytes = sizeof(struct fast_allocator_info *) * alloc_count;
+	new_allocators = (struct fast_allocator_info **)fc_malloc(bytes);
 	if (new_allocators == NULL)
 	{
-		result = errno != 0 ? errno : ENOMEM;
-		logError("file: "__FILE__", line: %d, "
-				"malloc %d bytes fail, errno: %d, error info: %s",
-				__LINE__, bytes, result, STRERROR(result));
-		return result;
+		return ENOMEM;
 	}
 
 	if (acontext->allocator_array.allocators != NULL)
@@ -103,47 +136,56 @@ static int allocator_array_check_capacity(struct fast_allocator_context *acontex
 			acontext->allocator_array.count);
 		free(acontext->allocator_array.allocators);
 	}
+    acontext->allocator_array.alloc = alloc_count;
 	acontext->allocator_array.allocators = new_allocators;
 	return 0;
 }
 
 static int region_init(struct fast_allocator_context *acontext,
-	struct fast_region_info *region)
+        const char *mblock_name_prefix, struct fast_region_info *region)
 {
+    const int64_t alloc_elements_limit = 0;
 	int result;
 	int bytes;
 	int element_size;
 	int allocator_count;
 	struct fast_allocator_info *allocator;
+    char *name;
+    char name_buff[FAST_MBLOCK_NAME_SIZE];
 
 	region->pad_mask = region->step - 1;
 	allocator_count = (region->end - region->start) / region->step;
 	bytes = sizeof(struct fast_allocator_info) * allocator_count;
-	region->allocators = (struct fast_allocator_info *)malloc(bytes);
+	region->allocators = (struct fast_allocator_info *)fc_malloc(bytes);
 	if (region->allocators == NULL)
 	{
-		result = errno != 0 ? errno : ENOMEM;
-		logError("file: "__FILE__", line: %d, "
-				"malloc %d bytes fail, errno: %d, error info: %s",
-				__LINE__, bytes, result, STRERROR(result));
-		return result;
+		return ENOMEM;
 	}
 	memset(region->allocators, 0, bytes);
-
 
 	if ((result=allocator_array_check_capacity(acontext, allocator_count)) != 0)
 	{
 		return result;
 	}
 
+    name = name_buff;
 	result = 0;
  	allocator = region->allocators;
 	for (element_size=region->start+region->step; element_size<=region->end;
 		element_size+=region->step,allocator++)
 	{
-		result = fast_mblock_init_ex2(&allocator->mblock, NULL, element_size,
-			region->alloc_elements_once, NULL, acontext->need_lock,
-			fast_allocator_malloc_trunk_check,
+        if (mblock_name_prefix != NULL)
+        {
+            snprintf(name, FAST_MBLOCK_NAME_SIZE, "%s-%d",
+                    mblock_name_prefix, element_size);
+        }
+        else
+        {
+            name = NULL;
+        }
+		result = fast_mblock_init_ex2(&allocator->mblock, name, element_size,
+			region->alloc_elements_once, alloc_elements_limit, NULL, NULL,
+            acontext->need_lock, fast_allocator_malloc_trunk_check,
 			fast_allocator_malloc_trunk_notify_func, acontext);
 		if (result != 0)
 		{
@@ -174,9 +216,10 @@ static void region_destroy(struct fast_allocator_context *acontext,
 }
 
 int fast_allocator_init_ex(struct fast_allocator_context *acontext,
-        struct fast_region_info *regions, const int region_count,
-        const int64_t alloc_bytes_limit, const double expect_usage_ratio,
-	const int reclaim_interval, const bool need_lock)
+        const char *mblock_name_prefix, struct fast_region_info *regions,
+        const int region_count, const int64_t alloc_bytes_limit,
+        const double expect_usage_ratio, const int reclaim_interval,
+        const bool need_lock)
 {
 	int result;
 	int bytes;
@@ -192,14 +235,10 @@ int fast_allocator_init_ex(struct fast_allocator_context *acontext,
 	}
 
 	bytes = sizeof(struct fast_region_info) * region_count;
-	acontext->regions = (struct fast_region_info *)malloc(bytes);
+	acontext->regions = (struct fast_region_info *)fc_malloc(bytes);
 	if (acontext->regions == NULL)
 	{
-		result = errno != 0 ? errno : ENOMEM;
-		logError("file: "__FILE__", line: %d, "
-				"malloc %d bytes fail, errno: %d, error info: %s",
-				__LINE__, bytes, result, STRERROR(result));
-		return result;
+		return ENOMEM;
 	}
 	memcpy(acontext->regions, regions, bytes);
 	acontext->region_count = region_count;
@@ -263,7 +302,7 @@ int fast_allocator_init_ex(struct fast_allocator_context *acontext,
 		}
 		previous_end = pRegion->end;
 
-		if ((result=region_init(acontext, pRegion)) != 0)
+		if ((result=region_init(acontext, mblock_name_prefix, pRegion)) != 0)
 		{
 			break;
 		}
@@ -287,31 +326,24 @@ int fast_allocator_init_ex(struct fast_allocator_context *acontext,
 	return result;
 }
 
-#define INIT_REGION(region, _start, _end, _step, _alloc_once) \
-	do { \
-		region.start = _start; \
-		region.end = _end;     \
-		region.step = _step;   \
-		region.alloc_elements_once = _alloc_once;   \
-	} while(0)
-
 int fast_allocator_init(struct fast_allocator_context *acontext,
-        const int64_t alloc_bytes_limit, const double expect_usage_ratio,
-	const int reclaim_interval, const bool need_lock)
+        const char *mblock_name_prefix, const int64_t alloc_bytes_limit,
+        const double expect_usage_ratio, const int reclaim_interval,
+        const bool need_lock)
 {
 #define DEFAULT_REGION_COUNT 5
 
-        struct fast_region_info regions[DEFAULT_REGION_COUNT]; 
+    struct fast_region_info regions[DEFAULT_REGION_COUNT];
 
-	INIT_REGION(regions[0],     0,   256,    8,  4096);
-	INIT_REGION(regions[1],   256,  1024,   16,  1024);
-	INIT_REGION(regions[2],  1024,  4096,   64,   256);
-	INIT_REGION(regions[3],  4096, 16384,  256,    64);
-	INIT_REGION(regions[4], 16384, 65536, 1024,    16);
+    FAST_ALLOCATOR_INIT_REGION(regions[0],     0,   256,    8, 4096);
+    FAST_ALLOCATOR_INIT_REGION(regions[1],   256,  1024,   16, 1024);
+    FAST_ALLOCATOR_INIT_REGION(regions[2],  1024,  4096,   64,  256);
+    FAST_ALLOCATOR_INIT_REGION(regions[3],  4096, 16384,  256,   64);
+    FAST_ALLOCATOR_INIT_REGION(regions[4], 16384, 65536, 1024,   16);
 
-	return fast_allocator_init_ex(acontext, regions,
-		DEFAULT_REGION_COUNT, alloc_bytes_limit,
-		expect_usage_ratio, reclaim_interval, need_lock);
+    return fast_allocator_init_ex(acontext, mblock_name_prefix, regions,
+            DEFAULT_REGION_COUNT, alloc_bytes_limit, expect_usage_ratio,
+            reclaim_interval, need_lock);
 }
 
 void fast_allocator_destroy(struct fast_allocator_context *acontext)
@@ -372,8 +404,10 @@ int fast_allocator_retry_reclaim(struct fast_allocator_context *acontext,
 
 	acontext->allocator_array.last_reclaim_time = get_current_time();
 	malloc_bytes = acontext->allocator_array.malloc_bytes;
-	logInfo("malloc_bytes: %"PRId64", ratio: %f", malloc_bytes, (double)acontext->alloc_bytes /
-		(double)malloc_bytes);
+    /*
+	logInfo("malloc_bytes: %"PRId64", ratio: %f", malloc_bytes,
+        (double)acontext->alloc_bytes / (double)malloc_bytes);
+        */
 
 	if (malloc_bytes == 0 || (double)acontext->alloc_bytes /
 		(double)malloc_bytes >= acontext->allocator_array.expect_usage_ratio)
@@ -386,7 +420,7 @@ int fast_allocator_retry_reclaim(struct fast_allocator_context *acontext,
 		if (fast_mblock_reclaim(&acontext->allocator_array.
 			allocators[i]->mblock, 0, &reclaim_count, NULL) == 0)
 		{
-			logInfo("reclaim_count: %d", reclaim_count);
+			//logInfo("reclaim_count: %d", reclaim_count);
 			*total_reclaim_bytes += reclaim_count *
 				acontext->allocator_array.allocators[i]->
 					mblock.info.trunk_size;
@@ -424,7 +458,7 @@ void *fast_allocator_alloc(struct fast_allocator_context *acontext,
 			{
 				return NULL;
 			}
-			logInfo("reclaimed bytes: %"PRId64, total_reclaim_bytes);
+			//logInfo("reclaimed bytes: %"PRId64, total_reclaim_bytes);
 			if (total_reclaim_bytes < allocator_info->mblock.info.trunk_size)
 			{
 				return NULL;
@@ -442,7 +476,7 @@ void *fast_allocator_alloc(struct fast_allocator_context *acontext,
 		{
 			return NULL;
 		}
-		ptr = malloc(alloc_bytes);
+		ptr = fc_malloc(alloc_bytes);
 		if (ptr == NULL)
 		{
 			return NULL;
@@ -503,3 +537,17 @@ void fast_allocator_free(struct fast_allocator_context *acontext, void *ptr)
 	}
 }
 
+char *fast_allocator_memdup(struct fast_allocator_context *acontext,
+        const char *src, const int len)
+{
+    char *dest;
+    dest = (char *)fast_allocator_alloc(acontext, len);
+    if (dest == NULL) {
+        logError("file: "__FILE__", line: %d, "
+                "malloc %d bytes fail", __LINE__, len);
+        return NULL;
+    }
+
+    memcpy(dest, src, len);
+    return dest;
+}

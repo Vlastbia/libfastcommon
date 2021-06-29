@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 //logger.h
 #ifndef LOGGER_H
@@ -29,10 +36,15 @@ extern "C" {
 #define LOG_COMPRESS_FLAGS_ENABLED    1
 #define LOG_COMPRESS_FLAGS_NEW_THREAD 2
 
+#define LOG_NOTHING    (LOG_DEBUG + 10)
+
 struct log_context;
 
 //log header line callback
 typedef void (*LogHeaderCallback)(struct log_context *pContext);
+
+#define FC_LOG_BY_LEVEL(level) \
+    (level <= g_log_context.log_level)
 
 typedef struct log_context
 {
@@ -158,6 +170,13 @@ int log_init2();
     log_it_ex2(pContext, NULL, header, header_len, false, false)
 
 #define log_destroy()  log_destroy_ex(&g_log_context)
+
+#define log_it1(priority, text, text_len) \
+    log_it_ex1(&g_log_context, priority, text, text_len)
+
+#define log_it2(caption, text, text_len, bNeedSync, bNeedLock) \
+    log_it_ex2(&g_log_context, caption, text, text_len, bNeedSync, bNeedLock)
+
 
 /** init function, use stderr for output by default
  *  parameters:

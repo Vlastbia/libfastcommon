@@ -1,33 +1,41 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include <unistd.h>
 #include <signal.h>
+#include <limits.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <netinet/in.h>
-#include <fcntl.h>
-#include <errno.h>
 #include <sys/file.h>
 #include <dirent.h>
 #include <grp.h>
 #include <pwd.h>
 #include <math.h>
 
-#include "shared_func.h"
 #include "logger.h"
 #include "sockopt.h"
+#include "fc_memory.h"
+#include "http_func.h"
+#include "shared_func.h"
 
 #ifdef OS_LINUX
 #include <sys/sysinfo.h>
@@ -294,12 +302,9 @@ int getUserProcIds(const char *progName, const bool bAllOwners, \
 		return -1;
 	}
 	
-	pTargetProg = (char *)malloc(strlen(progName) + 1);
+	pTargetProg = (char *)fc_malloc(strlen(progName) + 1);
 	if (pTargetProg == NULL)
 	{
-		logError("file: "__FILE__", line: %d, " \
-			"malloc %d bytes fail", __LINE__, \
-			(int)strlen(progName) + 1);
 		return -1;
 	}
 
@@ -322,7 +327,7 @@ int getUserProcIds(const char *progName, const bool bAllOwners, \
 		
 		sprintf(fullpath, "%s/%s", path, dirp->d_name);
 		memset(&statbuf, 0, sizeof(statbuf));
-		if (lstat(fullpath, &statbuf)<0)
+		if (lstat(fullpath, &statbuf) < 0)
 		{
 			continue;
 		}
@@ -510,34 +515,34 @@ char *bin2hex(const char *s, const int len, char *szHexBuff)
 
 char *hex2bin(const char *s, char *szBinBuff, int *nDestLen)
 {
-        char buff[3];
-	char *pSrc;
-	int nSrcLen;
-	char *pDest;
-	char *pDestEnd;
-	
-	nSrcLen = strlen(s);
-        if (nSrcLen == 0)
-        {
-          *nDestLen = 0;
-          szBinBuff[0] = '\0';
-          return szBinBuff;
-        }
+    char buff[3];
+    char *pSrc;
+    int nSrcLen;
+    char *pDest;
+    char *pDestEnd;
 
-	*nDestLen = nSrcLen / 2;
-	pSrc = (char *)s;
-        buff[2] = '\0';
+    nSrcLen = strlen(s);
+    if (nSrcLen == 0)
+    {
+        *nDestLen = 0;
+        szBinBuff[0] = '\0';
+        return szBinBuff;
+    }
 
-	pDestEnd = szBinBuff + (*nDestLen);
-	for (pDest=szBinBuff; pDest<pDestEnd; pDest++)
-	{
-		buff[0] = *pSrc++;
-		buff[1] = *pSrc++;
-		*pDest = (char)strtol(buff, NULL, 16);
-	}
-	
-	*pDest = '\0';
-	return szBinBuff;
+    *nDestLen = nSrcLen / 2;
+    pSrc = (char *)s;
+    buff[2] = '\0';
+
+    pDestEnd = szBinBuff + (*nDestLen);
+    for (pDest=szBinBuff; pDest<pDestEnd; pDest++)
+    {
+        buff[0] = *pSrc++;
+        buff[1] = *pSrc++;
+        *pDest = (char)strtol(buff, NULL, 16);
+    }
+
+    *pDest = '\0';
+    return szBinBuff;
 }
 
 void printBuffHex(const char *s, const int len)
@@ -692,6 +697,61 @@ int getOccurCount(const char *src, const char seperator)
 	return count;
 }
 
+int fc_get_file_line_count_ex(const char *filename,
+        const int64_t until_offset, int64_t *line_count)
+{
+#define READ_BUFFER_SIZE  (256 * 1024)
+    int fd;
+    int result;
+    int read_bytes;
+    int64_t remain_bytes;
+    char *buff;
+
+    *line_count = 0;
+    buff = (char *)fc_malloc(READ_BUFFER_SIZE);
+    if (buff == NULL) {
+        return ENOMEM;
+    }
+
+    fd = open(filename, O_RDONLY);
+    if (fd < 0) {
+        result = errno != 0 ? errno : EACCES;
+        logError("file: "__FILE__", line: %d, "
+                "open file \"%s\" fail, errno: %d, error info: %s",
+                __LINE__, filename, result, STRERROR(result));
+        free(buff);
+        return result;
+    }
+
+    if (until_offset >= 0) {
+        remain_bytes = until_offset;
+    } else {
+        remain_bytes = lseek(fd, 0, SEEK_END);
+    }
+    while (remain_bytes > 0) {
+        read_bytes = remain_bytes >= READ_BUFFER_SIZE ?
+            (READ_BUFFER_SIZE - 1) : remain_bytes;
+        read_bytes = read(fd, buff, read_bytes);
+        if (read_bytes == 0) {
+            break;
+        } else if (read_bytes < 0) {
+            result = errno != 0 ? errno : EIO;
+            logError("file: "__FILE__", line: %d, "
+                    "read file \"%s\" fail, errno: %d, error info: %s",
+                    __LINE__, filename, result, STRERROR(result));
+            return result;
+        }
+
+        *(buff + read_bytes) = '\0';
+        *line_count += getOccurCount(buff, '\n');
+        remain_bytes -= read_bytes;
+    }
+
+    close(fd);
+    free(buff);
+    return 0;
+}
+
 char **split(char *src, const char seperator, const int nMaxCols, int *nColCount)
 {
 	char **pCols;
@@ -720,12 +780,9 @@ char **split(char *src, const char seperator, const int nMaxCols, int *nColCount
 		*nColCount = nMaxCols;
 	}
 	
-	pCurrent = pCols = (char **)malloc(sizeof(char *) * (*nColCount));
+	pCurrent = pCols = (char **)fc_malloc(sizeof(char *) * (*nColCount));
 	if (pCols == NULL)
 	{
-		logError("file: "__FILE__", line: %d, " \
-			"malloc %d bytes fail", __LINE__, \
-			(int)sizeof(char *) * (*nColCount));
 		return NULL;
 	}
 
@@ -791,6 +848,47 @@ int splitEx(char *src, const char seperator, char **pCols, const int nMaxCols)
 	}
 
 	return count;
+}
+
+int split_string_ex(const string_t *src, const char seperator,
+        string_t *dest, const int max_count, const bool ignore_empty)
+{
+	const char *p;
+	string_t *current;
+    int len;
+
+	p = src->str;
+    len = src->len;
+	current = dest;
+	while (true)
+	{
+		if ((int)(current - dest) >= max_count)
+		{
+			break;
+		}
+
+		current->str = (char *)p;
+		p = memchr(p, seperator, len);
+		if (p == NULL)
+		{
+            if (len > 0 || !ignore_empty)
+            {
+                current->len = len;
+                current++;
+            }
+			break;
+		}
+
+        current->len = (char *)p - current->str;
+        len -= current->len + 1;
+        if (current->len > 0 || !ignore_empty)
+        {
+            current++;
+        }
+		p++;
+	}
+
+	return (int)(current - dest);
 }
 
 bool fc_match_delim(const char *str, const char *delim)
@@ -918,94 +1016,93 @@ int my_strtok(char *src, const char *delim, char **pCols, const int nMaxCols)
     return count;
 }
 
-int str_replace(const char *s, const int src_len, const char *replaced, 
-		        const char *new_str, char *dest, const int dest_size)
+int str_replace(const string_t *src, const string_t *old_str,
+        const string_t *new_str, string_t *dest, const int size)
 {
-	const char *pStart;
-	const char *pEnd;
-	char *pDest;
+	const char *ps;
+	const char *pe;
 	const char *p;
-	int old_len;
-	int new_len;
+	char *pd;
 	int len;
 	int max_dest_len;
 	int remain_len;
+    int result;
 
-	if (dest_size <= 0)
-	{
-		return 0;
-	}
+    if (size <= 0) {
+        dest->len = 0;
+        return EINVAL;
+    }
 
-	max_dest_len = dest_size - 1;
-	old_len = strlen(replaced);
-	new_len = strlen(new_str);
-	if (old_len == 0)
-	{
-		len = src_len < max_dest_len ? src_len : max_dest_len;
-		memcpy(dest, s, len);
-		dest[len] = '\0';
-		return len;
-	}
+	max_dest_len = size - 1;
+    if (old_str->len == 0) {
+        if (src->len <= max_dest_len) {
+            dest->len = src->len;
+            result = 0;
+        } else {
+            dest->len = max_dest_len;
+            result = EOVERFLOW;
+        }
+        memcpy(dest->str, src->str, dest->len);
+        *(dest->str + dest->len) = '\0';
+        return result;
+    }
 
 	remain_len = max_dest_len;
-	pDest = dest;
-	pStart = s;
-	pEnd = s + src_len;
-	while (1)
-	{
-		p = strstr(pStart, replaced);
-		if (p == NULL)
-		{
+	pd = dest->str;
+	ps = src->str;
+	pe = src->str + src->len;
+	while (1) {
+		p = strstr(ps, old_str->str);
+		if (p == NULL) {
 			break;
 		}
 
-		len = p - pStart;
-		if (len > 0)
-		{
-			if (len < remain_len)
-			{
-				memcpy(pDest, pStart, len);
-				pDest += len;
+		len = p - ps;
+		if (len > 0) {
+			if (len < remain_len) {
+				memcpy(pd, ps, len);
+				pd += len;
 				remain_len -= len;
-			}
-			else
-			{
-				memcpy(pDest, pStart, remain_len);
-				pDest += remain_len;
-				*pDest = '\0';
-				return pDest - dest;
+			} else {
+				memcpy(pd, ps, remain_len);
+				pd += remain_len;
+				*pd = '\0';
+                dest->len = pd - dest->str;
+				return EOVERFLOW;
 			}
 		}
 
-		if (new_len < remain_len)
-		{
-			memcpy(pDest, new_str, new_len);
-			pDest += new_len;
-			remain_len -= new_len;
-		}
-		else
-		{
-			memcpy(pDest, new_str, remain_len);
-			pDest += remain_len;
-			*pDest = '\0';
-			return pDest - dest;
-		}
+		if (new_str->len < remain_len) {
+			memcpy(pd, new_str->str, new_str->len);
+			pd += new_str->len;
+			remain_len -= new_str->len;
+        } else {
+            memcpy(pd, new_str->str, remain_len);
+            pd += remain_len;
+            *pd = '\0';
+            dest->len = pd - dest->str;
+            return EOVERFLOW;
+        }
 
-		pStart = p + old_len;
+		ps = p + old_str->len;
 	}
 
-	len = pEnd - pStart;
-	if (len > 0)
-	{
-		if (len > remain_len)
-		{
-			len = remain_len;
-		}
-		memcpy(pDest, pStart, len);
-		pDest += len;
-	}
-	*pDest = '\0';
-	return pDest - dest;
+	len = pe - ps;
+    if (len > 0) {
+        if (len <= remain_len) {
+            result = 0;
+        } else {
+            len = remain_len;
+            result = EOVERFLOW;
+        }
+        memcpy(pd, ps, len);
+        pd += len;
+    } else {
+        result = 0;
+    }
+	*pd = '\0';
+    dest->len = pd - dest->str;
+	return result;
 }
 
 bool fileExists(const char *filename)
@@ -1038,21 +1135,18 @@ bool isFile(const char *filename)
 void chopPath(char *filePath)
 {
 	int lastIndex;
-	if (*filePath == '\0')
-	{
-		return;
-	}
 
 	lastIndex = strlen(filePath) - 1;
-	if (filePath[lastIndex] == '/')
-	{
-		filePath[lastIndex] = '\0';
-	}
+	while (lastIndex >= 0 && filePath[lastIndex] == '/')
+    {
+        filePath[lastIndex--] = '\0';
+    }
 }
 
 int getFileContent(const char *filename, char **buff, int64_t *file_size)
 {
 	int fd;
+    int result;
 
     errno = 0;
     if (!isFile(filename))
@@ -1061,7 +1155,8 @@ int getFileContent(const char *filename, char **buff, int64_t *file_size)
 		*file_size = 0;
         if (errno != 0)
         {
-            if (errno == ENOENT)
+            result = errno;
+            if (result == ENOENT)
             {
                 logError("file: "__FILE__", line: %d, "
                         "file %s not exist", __LINE__, filename);
@@ -1070,9 +1165,9 @@ int getFileContent(const char *filename, char **buff, int64_t *file_size)
             {
                 logError("file: "__FILE__", line: %d, "
                         "stat %s fail, errno: %d, error info: %s",
-                        __LINE__, filename, errno, STRERROR(errno));
+                        __LINE__, filename, result, STRERROR(result));
             }
-            return errno != 0 ? errno : ENOENT;
+            return result;
         }
         else
         {
@@ -1087,59 +1182,59 @@ int getFileContent(const char *filename, char **buff, int64_t *file_size)
 	{
 		*buff = NULL;
 		*file_size = 0;
-		logError("file: "__FILE__", line: %d, " \
-			"open file %s fail, " \
-			"errno: %d, error info: %s", __LINE__, \
-			filename, errno, STRERROR(errno));
-		return errno != 0 ? errno : ENOENT;
+        result = errno != 0 ? errno : ENOENT;
+		logError("file: "__FILE__", line: %d, "
+			"open file %s fail, "
+			"errno: %d, error info: %s", __LINE__,
+			filename, result, STRERROR(result));
+        return result;
 	}
 
 	if ((*file_size=lseek(fd, 0, SEEK_END)) < 0)
 	{
 		*buff = NULL;
 		*file_size = 0;
+        result = errno != 0 ? errno : EIO;
 		close(fd);
-		logError("file: "__FILE__", line: %d, " \
-			"lseek file %s fail, " \
-			"errno: %d, error info: %s", __LINE__, \
-			filename, errno, STRERROR(errno));
-		return errno != 0 ? errno : EIO;
+		logError("file: "__FILE__", line: %d, "
+			"lseek file %s fail, "
+			"errno: %d, error info: %s", __LINE__,
+			filename, result, STRERROR(result));
+        return result;
 	}
 
-	*buff = (char *)malloc(*file_size + 1);
+	*buff = (char *)fc_malloc(*file_size + 1);
 	if (*buff == NULL)
 	{
 		*file_size = 0;
 		close(fd);
-
-		logError("file: "__FILE__", line: %d, " \
-			"malloc %d bytes fail", __LINE__, \
-			(int)(*file_size + 1));
-		return errno != 0 ? errno : ENOMEM;
+		return ENOMEM;
 	}
 
 	if (lseek(fd, 0, SEEK_SET) < 0)
 	{
 		*buff = NULL;
 		*file_size = 0;
+        result = errno != 0 ? errno : EIO;
 		close(fd);
-		logError("file: "__FILE__", line: %d, " \
-			"lseek file %s fail, " \
-			"errno: %d, error info: %s", __LINE__, \
-			filename, errno, STRERROR(errno));
-		return errno != 0 ? errno : EIO;
+		logError("file: "__FILE__", line: %d, "
+			"lseek file %s fail, "
+			"errno: %d, error info: %s", __LINE__,
+			filename, result, STRERROR(result));
+        return result;
 	}
 	if (read(fd, *buff, *file_size) != *file_size)
 	{
 		free(*buff);
 		*buff = NULL;
 		*file_size = 0;
+        result = errno != 0 ? errno : EIO;
 		close(fd);
-		logError("file: "__FILE__", line: %d, " \
-			"read from file %s fail, " \
-			"errno: %d, error info: %s", __LINE__, \
-			filename, errno, STRERROR(errno));
-		return errno != 0 ? errno : EIO;
+		logError("file: "__FILE__", line: %d, "
+			"read from file %s fail, "
+			"errno: %d, error info: %s", __LINE__,
+			filename, result, STRERROR(result));
+        return result;
 	}
 
 	(*buff)[*file_size] = '\0';
@@ -1152,13 +1247,13 @@ int getFileContentEx(const char *filename, char *buff, \
 		int64_t offset, int64_t *size)
 {
 	int fd;
+    int result;
 	int read_bytes;
 
 	if (*size <= 0)
 	{
-		logError("file: "__FILE__", line: %d, " \
-			"invalid size: %"PRId64, \
-			__LINE__, *size);
+		logError("file: "__FILE__", line: %d, "
+			"invalid size: %"PRId64, __LINE__, *size);
 		return EINVAL;
 	}
 	
@@ -1166,33 +1261,36 @@ int getFileContentEx(const char *filename, char *buff, \
 	if (fd < 0)
 	{
 		*size = 0;
-		logError("file: "__FILE__", line: %d, " \
-			"open file %s fail, " \
-			"errno: %d, error info: %s", __LINE__, \
-			filename, errno, STRERROR(errno));
-		return errno != 0 ? errno : ENOENT;
+        result = errno != 0 ? errno : ENOENT;
+		logError("file: "__FILE__", line: %d, "
+			"open file %s fail, "
+			"errno: %d, error info: %s", __LINE__,
+			filename, result, STRERROR(result));
+		return result;
 	}
 
 	if (offset > 0 && lseek(fd, offset, SEEK_SET) < 0)
 	{
 		*size = 0;
+        result = errno != 0 ? errno : EIO;
 		close(fd);
-		logError("file: "__FILE__", line: %d, " \
-			"lseek file %s fail, " \
-			"errno: %d, error info: %s", __LINE__, \
-			filename, errno, STRERROR(errno));
-		return errno != 0 ? errno : EIO;
+		logError("file: "__FILE__", line: %d, "
+			"lseek file %s fail, "
+			"errno: %d, error info: %s", __LINE__,
+			filename, result, STRERROR(result));
+		return result;
 	}
 
 	if ((read_bytes=read(fd, buff, *size - 1)) < 0)
 	{
 		*size = 0;
+        result = errno != 0 ? errno : EIO;
 		close(fd);
-		logError("file: "__FILE__", line: %d, " \
-			"read from file %s fail, " \
-			"errno: %d, error info: %s", __LINE__, \
-			filename, errno, STRERROR(errno));
-		return errno != 0 ? errno : EIO;
+		logError("file: "__FILE__", line: %d, "
+			"read from file %s fail, "
+			"errno: %d, error info: %s", __LINE__,
+			filename, result, STRERROR(result));
+		return result;
 	}
 
 	*size = read_bytes;
@@ -1200,6 +1298,22 @@ int getFileContentEx(const char *filename, char *buff, \
 	close(fd);
 
 	return 0;
+}
+
+int getFileSize(const char *filename, int64_t *file_size)
+{
+	struct stat buf;
+	if (stat(filename, &buf) != 0)
+	{
+		logError("file: "__FILE__", line: %d, "
+			"stat file %s fail, "
+			"errno: %d, error info: %s", __LINE__,
+			filename, errno, STRERROR(errno));
+		return errno != 0 ? errno : EIO;
+	}
+
+    *file_size = buf.st_size;
+    return 0;
 }
 
 int writeToFile(const char *filename, const char *buff, const int file_size)
@@ -1219,7 +1333,7 @@ int writeToFile(const char *filename, const char *buff, const int file_size)
 		return result;
 	}
 
-	if (write(fd, buff, file_size) != file_size)
+	if (fc_safe_write(fd, buff, file_size) != file_size)
 	{
 		result = errno != 0 ? errno : EIO;
 		logError("file: "__FILE__", line: %d, " \
@@ -1250,7 +1364,7 @@ int writeToFile(const char *filename, const char *buff, const int file_size)
 int safeWriteToFile(const char *filename, const char *buff, \
 		const int file_size)
 {
-	char tmpFilename[MAX_PATH_SIZE];
+	char tmpFilename[PATH_MAX];
 	int result;
 
 	snprintf(tmpFilename, sizeof(tmpFilename), "%s.tmp", filename);
@@ -1398,23 +1512,30 @@ int fd_gets(int fd, char *buff, const int size, int once_bytes)
 int set_rlimit(int resource, const rlim_t value)
 {
 	struct rlimit limit;
+    int64_t old_value;
 
 	if (getrlimit(resource, &limit) != 0)
 	{
-		logError("file: "__FILE__", line: %d, " \
-			"call getrlimit fail, resource=%d, " \
-			"errno: %d, error info: %s", \
+		logError("file: "__FILE__", line: %d, "
+			"call getrlimit fail, resource=%d, "
+			"errno: %d, error info: %s",
 			__LINE__, resource, errno, STRERROR(errno));
 		return errno != 0 ? errno : EPERM;
 	}
 
-	if (limit.rlim_cur == RLIM_INFINITY || \
+	if ((limit.rlim_cur == RLIM_INFINITY) ||
             (value != RLIM_INFINITY && limit.rlim_cur >= value))
 	{
 		return 0;
 	}
 
+    old_value = limit.rlim_cur;
 	limit.rlim_cur = value;
+    if (!((limit.rlim_max == RLIM_INFINITY) ||
+            (value != RLIM_INFINITY && limit.rlim_max >= value)))
+    {
+        limit.rlim_max = value;
+    }
 	if (setrlimit(resource, &limit) != 0)
 	{
         const char *label;
@@ -1461,8 +1582,7 @@ int set_rlimit(int resource, const rlim_t value)
 			"call setrlimit fail, resource=%d (%s), "
             "old value=%"PRId64", new value=%"PRId64", "
 			"errno: %d, error info: %s", __LINE__, resource, label,
-            (int64_t)limit.rlim_cur, (int64_t)value,
-			errno, STRERROR(errno));
+            old_value, (int64_t)value, errno, STRERROR(errno));
 		return errno != 0 ? errno : EPERM;
 	}
 
@@ -1653,15 +1773,10 @@ static int check_realloc_allow_ips(in_addr_t **allow_ip_addrs,
 	{
 		*alloc_count = target_ip_count;
 		bytes = sizeof(in_addr_t) * (*alloc_count);
-		*allow_ip_addrs = (in_addr_t *)realloc(*allow_ip_addrs, bytes);
+		*allow_ip_addrs = (in_addr_t *)fc_realloc(*allow_ip_addrs, bytes);
 		if (*allow_ip_addrs == NULL)
 		{
-			logError("file: "__FILE__", line: %d, "\
-				"malloc %d bytes fail, " \
-				"errno: %d, error info: %s", \
-				__LINE__, bytes, errno, STRERROR(errno));
-
-			return errno != 0 ? errno : ENOMEM;
+			return ENOMEM;
 		}
 	}
 
@@ -1950,14 +2065,10 @@ int load_allow_hosts(IniContext *pIniContext, \
 
 	alloc_count = count;
 	*allow_ip_count = 0;
-	*allow_ip_addrs = (in_addr_t *)malloc(sizeof(in_addr_t) * alloc_count);
+	*allow_ip_addrs = (in_addr_t *)fc_malloc(sizeof(in_addr_t) * alloc_count);
 	if (*allow_ip_addrs == NULL)
 	{
-		logError("file: "__FILE__", line: %d, " \
-			"malloc %d bytes fail, errno: %d, error info: %s.", \
-			__LINE__, (int)sizeof(in_addr_t) * alloc_count, \
-			errno, STRERROR(errno));
-		return errno != 0 ? errno : ENOMEM;
+		return ENOMEM;
 	}
 
 	for (pItem=pItemStart; pItem<pItemEnd; pItem++)
@@ -2065,37 +2176,70 @@ int cmp_by_ip_addr_t(const void *p1, const void *p2)
         return memcmp((in_addr_t *)p1, (in_addr_t *)p2, sizeof(in_addr_t));
 }
 
-int parse_bytes(char *pStr, const int default_unit_bytes, int64_t *bytes)
+int parse_bytes(const char *pStr, const int default_unit_bytes, int64_t *bytes)
 {
 	char *pReservedEnd;
+    int result;
 
 	pReservedEnd = NULL;
 	*bytes = strtol(pStr, &pReservedEnd, 10);
 	if (*bytes < 0)
-	{
-		logError("file: "__FILE__", line: %d, " \
-			"bytes: %"PRId64" < 0", __LINE__, *bytes);
-		return EINVAL;
-	}
+    {
+        logError("file: "__FILE__", line: %d, " \
+                "bytes: %"PRId64" < 0, input string: %s",
+                __LINE__, *bytes, pStr);
+        return EINVAL;
+    }
 
 	if (pReservedEnd == NULL || *pReservedEnd == '\0')
 	{
 		*bytes *= default_unit_bytes;
+        return 0;
+	}
+
+	if (*pReservedEnd == 'T' || *pReservedEnd == 't')
+	{
+		*bytes *= 1024 * 1024 * 1024 * 1024LL;
+        result = 0;
 	}
 	else if (*pReservedEnd == 'G' || *pReservedEnd == 'g')
 	{
 		*bytes *= 1024 * 1024 * 1024;
+        result = 0;
 	}
 	else if (*pReservedEnd == 'M' || *pReservedEnd == 'm')
 	{
 		*bytes *= 1024 * 1024;
+        result = 0;
 	}
 	else if (*pReservedEnd == 'K' || *pReservedEnd == 'k')
-	{
-		*bytes *= 1024;
-	}
+    {
+        *bytes *= 1024;
+        result = 0;
+    }
+    else
+    {
+        result = EINVAL;
+    }
 
-	return 0;
+    if (result == 0)
+    {
+        if (*(pReservedEnd + 1) == '\0')
+        {
+            return 0;
+        }
+        if ((*(pReservedEnd + 1) == 'B' || *(pReservedEnd + 1) == 'b') &&
+                (*(pReservedEnd + 2) == '\0'))
+        {
+            return 0;
+        }
+        result = EINVAL;
+    }
+
+    logError("file: "__FILE__", line: %d, "
+            "unkown byte unit: %s, input string: %s",
+            __LINE__, pReservedEnd, pStr);
+    return result;
 }
 
 int set_rand_seed()
@@ -2115,8 +2259,20 @@ int set_rand_seed()
 	return 0;
 }
 
-int get_time_item_from_conf(IniContext *pIniContext, \
-		const char *item_name, TimeInfo *pTimeInfo, \
+int get_time_item_from_conf_ex(IniFullContext *ini_ctx,
+		const char *item_name, TimeInfo *pTimeInfo,
+		const byte default_hour, const byte default_minute,
+        const bool bRetryGlobal)
+{
+    char *pValue;
+    pValue = iniGetStrValueEx(ini_ctx->section_name, item_name,
+            ini_ctx->context, bRetryGlobal);
+    return get_time_item_from_str(pValue, item_name, pTimeInfo,
+            default_hour, default_minute);
+}
+
+int get_time_item_from_conf(IniContext *pIniContext,
+		const char *item_name, TimeInfo *pTimeInfo,
 		const byte default_hour, const byte default_minute)
 {
 	char *pValue;
@@ -2146,8 +2302,8 @@ int get_time_item_from_str(const char *pValue, const char *item_name,
     count = sscanf(pValue, "%d:%d:%d", &hour, &minute, &second);
 	if (count != 2 && count != 3)
 	{
-		logError("file: "__FILE__", line: %d, " \
-			"item \"%s\" 's value \"%s\" is not an valid time", \
+		logError("file: "__FILE__", line: %d, "
+			"item \"%s\" 's value \"%s\" is not an valid time",
 			__LINE__, item_name, pValue);
 		return EINVAL;
 	}
@@ -2155,8 +2311,8 @@ int get_time_item_from_str(const char *pValue, const char *item_name,
 	if ((hour < 0 || hour > 23) || (minute < 0 || minute > 59)
              || (second < 0 || second > 59))
 	{
-		logError("file: "__FILE__", line: %d, " \
-			"item \"%s\" 's value \"%s\" is not an valid time", \
+		logError("file: "__FILE__", line: %d, "
+			"item \"%s\" 's value \"%s\" is not an valid time",
 			__LINE__, item_name, pValue);
 		return EINVAL;
 	}
@@ -2285,16 +2441,11 @@ int buffer_strcpy(BufferInfo *pBuff, const char *str)
 		}
 
 		pBuff->alloc_size = pBuff->length + 1;
-		pBuff->buff = (char *)malloc(pBuff->alloc_size);
+		pBuff->buff = (char *)fc_malloc(pBuff->alloc_size);
 		if (pBuff->buff == NULL)
 		{
-			logError("file: "__FILE__", line: %d, " \
-				"malloc %d bytes fail, " \
-				"errno: %d, error info: %s", \
-				__LINE__, pBuff->alloc_size, \
-				errno, STRERROR(errno));
 			pBuff->alloc_size = 0;
-			return errno != 0 ? errno : ENOMEM;
+			return ENOMEM;
 		}
 	}
 
@@ -2313,16 +2464,11 @@ int buffer_memcpy(BufferInfo *pBuff, const char *buff, const int len)
 		}
 
 		pBuff->alloc_size = pBuff->length;
-		pBuff->buff = (char *)malloc(pBuff->alloc_size);
+		pBuff->buff = (char *)fc_malloc(pBuff->alloc_size);
 		if (pBuff->buff == NULL)
 		{
-			logError("file: "__FILE__", line: %d, " \
-				"malloc %d bytes fail, " \
-				"errno: %d, error info: %s", \
-				__LINE__, pBuff->alloc_size, \
-				errno, STRERROR(errno));
 			pBuff->alloc_size = 0;
-			return errno != 0 ? errno : ENOMEM;
+			return ENOMEM;
 		}
 	}
 
@@ -2441,15 +2587,30 @@ bool is_private_ip(const char* ip)
     return false;
 }
 
+int64_t get_current_time_ns()
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0)
+    {
+        logError("file: "__FILE__", line: %d, "
+                "call clock_gettime fail, "
+                "errno: %d, error info: %s",
+                __LINE__, errno, STRERROR(errno));
+        return errno != 0 ? errno : EPERM;
+    }
+
+	return ((int64_t)ts.tv_sec * 1000 * 1000 * 1000LL + (int64_t)ts.tv_nsec);
+}
+
 int64_t get_current_time_us()
 {
 	struct timeval tv;
 
 	if (gettimeofday(&tv, NULL) != 0)
 	{
-		logError("file: "__FILE__", line: %d, " \
-			 "call gettimeofday fail, " \
-			 "errno: %d, error info: %s", \
+		logError("file: "__FILE__", line: %d, "
+			 "call gettimeofday fail, "
+			 "errno: %d, error info: %s",
 			 __LINE__, errno, STRERROR(errno));
 		return errno != 0 ? errno : EPERM;
 	}
@@ -2475,9 +2636,9 @@ static inline int do_lock_file(int fd, int cmd, int type)
         if ((result=fcntl(fd, cmd, &lock)) != 0)
         {
             result = errno != 0 ? errno : ENOMEM;
-            fprintf(stderr, "call fcntl fail, "
-                   "errno: %d, error info: %s\n",
-                   result, STRERROR(result));
+            fprintf(stderr, "file: "__FILE__", line: %d, "
+                    "call fcntl fail, errno: %d, error info: %s\n",
+                    __LINE__, result, STRERROR(result));
         }
     } while (result == EINTR);
 
@@ -2764,15 +2925,12 @@ bool ends_with(const char *str, const char *needle)
     return memcmp(str + start_offset, needle, needle_len) == 0;
 }
 
-char *fc_strdup(const char *str, const int len)
+char *fc_strdup1(const char *str, const int len)
 {
     char *output;
 
-    output = (char *)malloc(len + 1);
+    output = (char *)fc_malloc(len + 1);
     if (output == NULL) {
-        logError("file: "__FILE__", line: %d, "
-                "malloc %d bytes fail",
-                __LINE__, len + 1);
         return NULL;
     }
 
@@ -2813,6 +2971,23 @@ const char *fc_memmem(const string_t *str, const string_t *needle)
     return NULL;
 }
 
+const char *fc_memrchr(const char *str, const int ch, const int len)
+{
+    const char *p;
+
+    p = str + len - 1;
+    while (p >= str)
+    {
+        if (*p == ch)
+        {
+            return p;
+        }
+        --p;
+    }
+
+    return NULL;
+}
+
 char *format_http_date(time_t t, BufferInfo *buffer)
 {
     struct tm tm_info;
@@ -2823,26 +2998,640 @@ char *format_http_date(time_t t, BufferInfo *buffer)
     return buffer->buff;
 }
 
-char *resolve_path(const char *from, const char *filename,
+int normalize_path(const char *from, const char *filename,
         char *full_filename, const int size)
 {
     const char *last;
     int len;
 
+    if (IS_FILE_RESOURCE(from)) {
+        from = from + FILE_RESOURCE_TAG_LEN;
+    }
+    if (IS_FILE_RESOURCE(filename)) {
+        filename = filename + FILE_RESOURCE_TAG_LEN;
+    }
+
     if (*filename == '/') {
-        snprintf(full_filename, size, "%s", filename);
-        return full_filename;
+        return snprintf(full_filename, size, "%s", filename);
     }
 
     last = strrchr(from, '/');
     if (last != NULL) {
         len = last - from;
-        snprintf(full_filename, size, "%.*s/%s", len, from, filename);
+        return snprintf(full_filename, size, "%.*s/%s", len, from, filename);
     } else {
-		logWarning("file: "__FILE__", line: %d, "
+        logWarning("file: "__FILE__", line: %d, "
                 "no \"/\" in the from filename: %s",
                 __LINE__, from);
-        snprintf(full_filename, size, "%s", filename);
+        return snprintf(full_filename, size, "%s", filename);
     }
-    return full_filename;
+}
+
+int normalize_uri(const string_t *from, const char *uri,
+        char *dest, const int size)
+{
+#define MAX_UP_PATH_COUNT  8
+    const char *start;
+    const char *end;
+    const char *last;
+    string_t fpath;
+    string_t parts[MAX_UP_PATH_COUNT];
+    int up_count;
+    int path_count;
+    int keep_count;
+    int len;
+    int i;
+
+    if (*uri == '/') {
+        return snprintf(dest, size, "%s", uri);
+    }
+
+    end = uri + strlen(uri);
+    up_count = 0;
+    start = uri;
+    while (start + 3 < end) {
+        if (memcmp(start, "../", 3) != 0) {
+            break;
+        }
+
+        ++up_count;
+        start += 3;
+    }
+
+    last = fc_memrchr(from->str, '/', from->len);
+    if (last == NULL) {
+        logWarning("file: "__FILE__", line: %d, "
+                "no \"/\" in the from uri: %s",
+                __LINE__, from->str);
+        return snprintf(dest, size, "/%s", start);
+    }
+
+    if (up_count == 0) {
+        return snprintf(dest, size, "%.*s/%s",
+                (int)(last - from->str), from->str, uri);
+    } else {
+        fpath.str = (char *)from->str;
+        fpath.len = last - from->str;
+        path_count = split_string_ex(&fpath, '/',
+                parts, MAX_UP_PATH_COUNT, true);
+        keep_count = path_count - up_count;
+        if (keep_count < 0) {
+            logWarning("file: "__FILE__", line: %d, "
+                    "uri: %s, contails too many \"../\"",
+                    __LINE__, uri);
+        }
+
+        len = 0;
+        for (i=0; i<keep_count; i++) {
+            len += snprintf(dest + len, size - len,
+                    "/%.*s", parts[i].len, parts[i].str);
+        }
+
+        len += snprintf(dest + len, size - len, "/%s", start);
+        return len;
+    }
+}
+
+int normalize_path_ex(const char *from, const char *filename,
+        char *full_filename, const int size, const int flags)
+{
+    bool is_url_from;
+    bool is_url_filename;
+    const char *base_end;
+    const char *from_ask;
+    const char *dest_ask;
+    string_t from_uri;
+    int base_len;
+    int full_len;
+
+    if ((flags & NORMALIZE_FLAGS_URL_ENABLED) == 0) {
+        return normalize_path(from, filename, full_filename, size);
+    }
+
+    is_url_from = IS_URL_RESOURCE(from);
+    is_url_filename = IS_URL_RESOURCE(filename);
+    if (!(is_url_from || is_url_filename)) {
+        return normalize_path(from, filename, full_filename, size);
+    }
+
+    if (IS_FILE_RESOURCE(filename)) {
+        return snprintf(full_filename, size, "%s",
+                filename + FILE_RESOURCE_TAG_LEN);
+    }
+
+    if (!is_url_from) {
+        return snprintf(full_filename, size, "%s", filename);
+    }
+
+    if (is_url_filename) {
+        full_len = snprintf(full_filename, size, "%s", filename);
+        if ((flags & NORMALIZE_FLAGS_URL_APPEND_PARAMS) == 0) {
+            return full_len;
+        }
+        from_ask = strchr(from + 8, '?');
+    } else {
+        base_end = strchr(from + 8, '/');
+        if (base_end == NULL) {
+            return snprintf(full_filename, size, "%s%s%s",
+                    from, (*filename == '/' ? "" : "/"), filename);
+        }
+
+        base_len = base_end - from;
+        from_ask = strchr(base_end + 1, '?');
+        from_uri.str = (char *)base_end;
+        if (from_ask == NULL) {
+            from_uri.len = strlen(from_uri.str);
+        } else {
+            from_uri.len = from_ask - from_uri.str;
+        }
+
+        full_len = snprintf(full_filename, size, "%.*s", base_len, from);
+        full_len = normalize_uri(&from_uri, filename,
+                full_filename + full_len, size - full_len);
+    }
+
+    if ((flags & NORMALIZE_FLAGS_URL_APPEND_PARAMS) != 0) {
+        if (from_ask != NULL) {
+            dest_ask = strchr(filename, '?');
+            full_len += snprintf(full_filename + full_len,
+                    size - full_len, "%c%s", (dest_ask == NULL ?
+                        '?' : '&'), from_ask + 1);
+        }
+    }
+
+    return full_len;
+}
+
+const char *get_gzip_command_filename()
+{
+    if (access("/usr/bin/gzip", F_OK) == 0)
+    {
+        return "/usr/bin/gzip";
+    }
+    else if (access("/bin/gzip", F_OK) == 0)
+    {
+        return "/bin/gzip";
+    }
+    else if (access("/usr/local/bin/gzip", F_OK) == 0)
+    {
+        return "/usr/local/bin/gzip";
+    }
+    else
+    {
+        return "gzip";
+    }
+}
+
+int fc_delete_file_ex(const char *filename, const char *caption)
+{
+    int result;
+
+    if (unlink(filename) == 0)
+    {
+        return 0;
+    }
+
+    result = errno != 0 ? errno : ENOENT;
+    if (result == ENOENT)
+    {
+        result = 0;
+    }
+    else
+    {
+        logError("file: "__FILE__", line: %d, "
+                "unlink %s file: %s fail, "
+                "errno: %d, error info: %s",
+                __LINE__, caption, filename,
+                result, STRERROR(result));
+    }
+
+    return result;
+}
+
+bool fc_is_prime(const int64_t n)
+{
+    int64_t loop;
+    int64_t i;
+
+    if (n <= 0)
+    {
+        return false;
+    }
+
+    loop = llround(sqrt((double)n));
+    for (i=2; i<=loop; i++)
+    {
+        if (n % i == 0)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+int64_t fc_floor_prime(const int64_t n)
+{
+    int64_t start;
+    int64_t i;
+
+    start =  (n % 2 == 0 ? n - 1 : n);
+    for (i = start; i > 0; i -= 2)
+    {
+      if (fc_is_prime(i))
+      {
+          return i;
+      }
+    }
+
+    return 1;
+}
+
+int64_t fc_ceil_prime(const int64_t n)
+{
+    int64_t i;
+
+    if (n <= 0)
+    {
+        return 1;
+    }
+
+    i = (n % 2 == 0 ? n + 1 : n);
+    while (!fc_is_prime(i))
+    {
+        i += 2;
+    }
+
+    return i;
+}
+
+int fc_init_buffer(BufferInfo *buffer, const int buffer_size)
+
+{
+    buffer->buff = (char *)fc_malloc(buffer_size);
+    if (buffer->buff == NULL)
+    {
+        return ENOMEM;
+    }
+    buffer->alloc_size = buffer_size;
+    buffer->length = 0;
+    return 0;
+}
+
+void fc_free_buffer(BufferInfo *buffer)
+{
+    if (buffer->buff != NULL)
+    {
+        free(buffer->buff);
+        buffer->buff = NULL;
+        buffer->alloc_size = buffer->length = 0;
+    }
+}
+
+int fc_check_mkdir_ex(const char *path, const mode_t mode, bool *created)
+{
+    int result;
+
+    *created = false;
+    if (access(path, F_OK) == 0) {
+        return 0;
+    }
+
+    result = errno != 0 ? errno : EPERM;
+    if (result != ENOENT) {
+        logError("file: "__FILE__", line: %d, "
+                "access %s fail, errno: %d, error info: %s",
+                __LINE__, path, result, STRERROR(result));
+        return result;
+    }
+
+    if (mkdir(path, mode) != 0) {
+        result = errno != 0 ? errno : EPERM;
+        if (result == EEXIST) {
+            return 0;
+        }
+
+        logError("file: "__FILE__", line: %d, "
+                "mkdir %s fail, errno: %d, error info: %s",
+                __LINE__, path, result, STRERROR(result));
+        return result;
+    }
+
+    *created = true;
+    return 0;
+}
+
+int fc_mkdirs_ex(const char *path, const mode_t mode, int *create_count)
+{
+#define MAX_SUBDIR_COUNT 128
+    int result;
+    int path_len;
+    int dir_count;
+    int i;
+    bool created;
+    char new_path[PATH_MAX];
+    char buff[PATH_MAX];
+    string_t fp;
+    char *subdirs[MAX_SUBDIR_COUNT];
+
+    *create_count = 0;
+    if (access(path, F_OK) == 0) {
+        return 0;
+    }
+
+    path_len = strlen(path);
+    if (path_len >= sizeof(new_path)) {
+        logError("file: "__FILE__", line: %d, "
+                "path length: %d is too large, exceeds %d",
+                __LINE__, path_len, (int)sizeof(new_path));
+        return ENAMETOOLONG;
+    }
+
+    FC_SET_STRING_EX(fp, buff, 0);
+    memcpy(new_path, path, path_len + 1);
+    dir_count = splitEx(new_path, '/', subdirs, MAX_SUBDIR_COUNT);
+    for (i=0; i<dir_count; i++) {
+        fp.len += sprintf(fp.str + fp.len, "%s/", subdirs[i]);
+        if ((result=fc_check_mkdir_ex(fp.str, mode, &created)) != 0) {
+            return result;
+        }
+        if (created) {
+            (*create_count)++;
+        }
+    }
+
+    return 0;
+}
+
+int fc_get_first_line(const char *filename, char *buff,
+        const int buff_size, string_t *line)
+{
+    int result;
+    int64_t read_bytes;
+    char *line_end;
+
+    read_bytes = buff_size - 1;
+    if ((result=getFileContentEx(filename, buff, 0, &read_bytes)) != 0) {
+        return result;
+    }
+    if (read_bytes == 0) {
+        return ENOENT;
+    }
+
+    line_end = (char *)memchr(buff, '\n', read_bytes);
+    if (line_end == NULL) {
+        logError("file: "__FILE__", line: %d, "
+                "file: %s, line no: 1, "
+                "expect new line char \"\\n\"",
+                __LINE__, filename);
+        return EINVAL;
+    }
+    line->str = buff;
+    line->len = line_end - buff + 1;
+    return 0;
+}
+
+int fc_get_last_line(const char *filename, char *buff,
+        const int buff_size, int64_t *file_size, string_t *line)
+{
+    int64_t offset;
+    int64_t read_bytes;
+    int result;
+
+    if ((result=getFileSize(filename, file_size)) != 0) {
+        return result;
+    }
+
+    if (*file_size == 0) {
+        return ENOENT;
+    }
+
+    if (*file_size >= buff_size) {
+        offset = (*file_size - buff_size) + 1;
+    } else {
+        offset = 0;
+    }
+    read_bytes = (*file_size - offset) + 1;
+    if ((result=getFileContentEx(filename, buff,
+                    offset, &read_bytes)) != 0)
+    {
+        return result;
+    }
+    if (read_bytes == 0) {
+        return ENOENT;
+    }
+
+    line->str = (char *)fc_memrchr(buff, '\n', read_bytes - 1);
+    if (line->str == NULL) {
+        line->str = buff;
+    } else {
+        line->str += 1;  //skip \n
+    }
+    line->len = (buff + read_bytes) - line->str;
+    return 0;
+}
+
+int fc_get_last_lines(const char *filename, char *buff,
+        const int buff_size, string_t *lines, int *count)
+{
+    int64_t file_size;
+    int64_t offset;
+    int64_t read_bytes;
+    int remain_len;
+    int i;
+    int result;
+
+    if (*count <= 0) {
+        return EINVAL;
+    }
+
+    if ((result=getFileSize(filename, &file_size)) != 0) {
+        *count = 0;
+        return result;
+    }
+
+    if (file_size == 0) {
+        *count = 0;
+        return ENOENT;
+    }
+
+    if (file_size >= buff_size) {
+        offset = (file_size - buff_size) + 1;
+    } else {
+        offset = 0;
+    }
+    read_bytes = (file_size - offset) + 1;
+    if ((result=getFileContentEx(filename, buff,
+                    offset, &read_bytes)) != 0)
+    {
+        return result;
+    }
+    if (read_bytes == 0) {
+        *count = 0;
+        return ENOENT;
+    }
+
+    remain_len = read_bytes - 1;
+    for (i=0; i<*count; i++) {
+        lines->str = (char *)fc_memrchr(buff, '\n', remain_len);
+        if (lines->str == NULL) {
+            lines->str = buff;
+            break;
+        }
+
+        remain_len = lines->str - buff;
+    }
+
+    if (i < *count) {
+        *count = i + 1;
+    } else {
+        lines->str += 1;  //skip \n
+    }
+    lines->len = (buff + read_bytes) - lines->str;
+    return 0;
+}
+
+static bool path_contains_special(const string_t *pts, const int count)
+{
+    const string_t *ps;
+    const string_t *end;
+
+    end = pts + count;
+    for (ps=pts; ps<end; ps++) {
+        if ((ps->len == 1 && *ps->str == '.') ||
+                fc_string_equal2(ps, "..", 2))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool fc_path_contains(const string_t *path, const string_t *needle,
+        int *result)
+{
+#define MAX_PATH_SECTION_COUNT   128
+
+    string_t pts[MAX_PATH_SECTION_COUNT];
+    string_t nds[MAX_PATH_SECTION_COUNT];
+    string_t *ps;
+    string_t *ns;
+    string_t *end;
+    int pc;
+    int nc;
+
+    if ((path->len == 0 || *path->str != '/') ||
+            (needle->len == 0 || *needle->str != '/'))
+    {
+        *result = EINVAL;
+        return false;
+    }
+
+    pc = split_string_ex(path, '/', pts, MAX_PATH_SECTION_COUNT, true);
+    if (pc == MAX_PATH_SECTION_COUNT) {
+        *result = ENAMETOOLONG;
+        return false;
+    }
+    if (path_contains_special(pts, pc)) {
+        *result = EINVAL;
+        return false;
+    }
+
+    nc = split_string_ex(needle, '/', nds, MAX_PATH_SECTION_COUNT, true);
+    if (nc == MAX_PATH_SECTION_COUNT) {
+        *result = ENAMETOOLONG;
+        return false;
+    }
+    if (path_contains_special(nds, nc)) {
+        *result = EINVAL;
+        return false;
+    }
+
+    *result = 0;
+    if (nc > pc) {
+        return false;
+    }
+
+    end = nds + nc;
+    for (ns=nds, ps=pts; ns<end; ns++, ps++) {
+        if (!fc_string_equal(ns, ps)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+int fc_check_filename_ex(const string_t *filename, const char *caption,
+        char *error_info, int *error_len, const int error_size)
+{
+    if (filename->len <= 0) {
+        *error_len = snprintf(error_info, error_size,
+                "invalid %s, length: %d <= 0",
+                caption, filename->len);
+        return EINVAL;
+    }
+
+    if (fc_string_equal2(filename, ".", 1) ||
+            fc_string_equal2(filename, "..", 2))
+    {
+        *error_len = snprintf(error_info, error_size,
+                "invalid %s: %.*s", caption,
+                filename->len, filename->str);
+        return EINVAL;
+    }
+
+    if (memchr(filename->str, '/', filename->len) != NULL) {
+        *error_len = snprintf(error_info, error_size,
+                "%s is invalid because contains /", caption);
+        return EINVAL;
+    }
+
+    if (memchr(filename->str, '\0', filename->len) != NULL) {
+        *error_len = snprintf(error_info, error_size,
+                "%s is invalid because contains 0x0", caption);
+        return EINVAL;
+    }
+
+    return 0;
+}
+
+int fc_check_filename(const string_t *filename, const char *caption)
+{
+    char error_info[256];
+    int error_len;
+    int result;
+
+    if ((result=fc_check_filename_ex(filename, caption, error_info,
+                    &error_len, sizeof(error_info))) != 0)
+    {
+        logError("file: "__FILE__", line: %d, "
+                "%s", __LINE__, error_info);
+    }
+    return result;
+}
+
+bool is_digital_string(const char *str)
+{
+    const char *p;
+    const char *end;
+    int len;
+
+    len = strlen(str);
+    if (len == 0)
+    {
+        return false;
+    }
+
+    end = str + len;
+    for (p=str; p<end; p++)
+    {
+        if (!FC_IS_DIGITAL(*p))
+        {
+            return false;
+        }
+    }
+
+    return true;
 }

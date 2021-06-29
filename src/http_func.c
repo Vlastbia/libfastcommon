@@ -1,10 +1,25 @@
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 
 /**
 * Copyright (C) 2008 Happy Fish / YuQing
 *
 * FastDFS may be copied only under the terms of the GNU General
 * Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
+* Please visit the FastDFS Home Page http://www.fastken.com/ for more detail.
 **/
 
 #include <time.h>
@@ -21,7 +36,133 @@
 #include "sockopt.h"
 #include "logger.h"
 #include "shared_func.h"
+#include "fc_memory.h"
 #include "http_func.h"
+
+#ifdef USE_LIBCURL
+#include <curl/curl.h>
+
+static bool curl_inited = false;
+
+typedef struct {
+    char *buff;
+    int length;
+    int alloc_size;
+    bool dynamic_alloc;
+} CurlCallbackArg;
+
+static size_t curl_write_data(void *ptr, size_t size,
+        size_t nmemb, void *userdata)
+{
+    size_t len;
+    int alloc_size;
+    char *new_buff;
+    CurlCallbackArg *cbarg;
+
+    cbarg = (CurlCallbackArg *)userdata;
+    len = size * nmemb;
+    if ((cbarg->alloc_size - cbarg->length) < len) {
+        if (!cbarg->dynamic_alloc) {
+            return 0;
+        }
+
+        alloc_size = 2 * cbarg->alloc_size;
+        while ((alloc_size - cbarg->length) < len) {
+            alloc_size *= 2;
+        }
+
+        new_buff = (char *)fc_malloc(alloc_size);
+        if (new_buff == NULL) {
+            return 0;
+        }
+
+        if (cbarg->length > 0) {
+            memcpy(new_buff, cbarg->buff, cbarg->length);
+        }
+        free(cbarg->buff);
+
+        cbarg->buff = new_buff;
+        cbarg->alloc_size = alloc_size;
+    }
+
+    memcpy(cbarg->buff + cbarg->length, ptr, len);
+    cbarg->length += len;
+    return len;
+}
+
+int get_url_content_ex(const char *url, const int url_len,
+        const int connect_timeout, const int network_timeout,
+        int *http_status, char **content, int *content_len,
+        char *error_info)
+{
+    CURLcode result;
+    long response_code;
+    CURL *curl;
+    CurlCallbackArg cbarg;
+
+    *error_info = '\0';
+	*http_status = 0;
+    if (!curl_inited) {
+        if ((result=curl_global_init(CURL_GLOBAL_ALL)) != 0) {
+            sprintf(error_info, "curl_global_init fail "
+                    "with code: %d", result);
+            return errno != 0 ? errno : EBUSY;
+        }
+        curl_inited = true;
+    }
+
+    if ((curl=curl_easy_init()) == NULL) {
+        sprintf(error_info, "curl_easy_init fail");
+        return errno != 0 ? errno : EBUSY;
+    }
+
+    if (*content == NULL) {
+        cbarg.dynamic_alloc = true;
+        cbarg.alloc_size = 16 * 1024;
+        cbarg.buff = (char *)fc_malloc(cbarg.alloc_size);
+        if (cbarg.buff == NULL) {
+            return ENOMEM;
+        }
+    } else {
+        cbarg.dynamic_alloc = false;
+        cbarg.alloc_size = *content_len;
+        cbarg.buff = *content;
+    }
+    cbarg.length = 0;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, connect_timeout);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, connect_timeout + network_timeout);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_data);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &cbarg);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0);
+
+    result = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+    curl_easy_cleanup(curl);
+
+    *http_status = response_code;
+    if (result == CURLE_OK) {
+        if (cbarg.dynamic_alloc) {
+            *content = cbarg.buff;
+        }
+        *content_len = cbarg.length;
+        *(*content + *content_len) = '\0';
+        return 0;
+    } else {
+        sprintf(error_info, "curl_easy_perform fail with code: %d, %s",
+                result, curl_easy_strerror(result));
+        if (cbarg.dynamic_alloc && cbarg.buff != NULL) {
+            free(cbarg.buff);
+        }
+        *content_len = 0;
+        return EACCES;
+    }
+}
+
+#else
 
 int get_url_content_ex(const char *url, const int url_len,
         const int connect_timeout, const int network_timeout,
@@ -44,6 +185,7 @@ int get_url_content_ex(const char *url, const int url_len,
 	char *pPort;
 	char *pSpace;
 
+    *error_info = '\0';
 	*http_status = 0;
     if (*content == NULL)
     {
@@ -130,7 +272,7 @@ int get_url_content_ex(const char *url, const int url_len,
 		close(sock);
 
 		sprintf(error_info, "file: "__FILE__", line: %d, " \
-			"connect to %s:%d fail, errno: %d, " \
+			"connect to %s:%u fail, errno: %d, " \
 			"error info: %s", __LINE__, domain_name, \
 			port, result, STRERROR(result));
 
@@ -139,7 +281,7 @@ int get_url_content_ex(const char *url, const int url_len,
 
 	out_len = snprintf(out_buff, sizeof(out_buff), \
 		"GET %s HTTP/1.0\r\n" \
-		"Host: %s:%d\r\n" \
+		"Host: %s:%u\r\n" \
 		"Connection: close\r\n" \
 		"\r\n", pURI, domain_name, port);
 	if ((result=tcpsenddata(sock, out_buff, out_len, network_timeout)) != 0)
@@ -147,7 +289,7 @@ int get_url_content_ex(const char *url, const int url_len,
 		close(sock);
 
 		sprintf(error_info, "file: "__FILE__", line: %d, " \
-			"send data to %s:%d fail, errno: %d, " \
+			"send data to %s:%u fail, errno: %d, " \
 			"error info: %s", __LINE__, domain_name, \
 			port, result, STRERROR(result));
 
@@ -156,18 +298,11 @@ int get_url_content_ex(const char *url, const int url_len,
 
     if (bNeedAlloc)
     {
-        *content = (char *)malloc(alloc_size + 1);
+        *content = (char *)fc_malloc(alloc_size + 1);
         if (*content == NULL)
         {
             close(sock);
-            result = errno != 0 ? errno : ENOMEM;
-
-            sprintf(error_info, "file: "__FILE__", line: %d, " \
-                    "malloc %d bytes fail, errno: %d, " \
-                    "error info: %s", __LINE__, alloc_size + 1, \
-                    result, STRERROR(result));
-
-            return result;
+            return ENOMEM;
         }
     }
 
@@ -179,20 +314,12 @@ int get_url_content_ex(const char *url, const int url_len,
             if (bNeedAlloc)
             {
                 alloc_size *= 2;
-                *content = (char *)realloc(*content, alloc_size + 1);
+                *content = (char *)fc_realloc(*content, alloc_size + 1);
                 if (*content == NULL)
                 {
                     *content_len = 0;
                     close(sock);
-                    result = errno != 0 ? errno : ENOMEM;
-
-                    sprintf(error_info, "file: "__FILE__", line: %d, " \
-                            "realloc %d bytes fail, errno: %d, " \
-                            "error info: %s", __LINE__, \
-                            alloc_size + 1, \
-                            result, STRERROR(result));
-
-                    return result;
+                    return ENOMEM;
                 }
 
                 recv_bytes = alloc_size - *content_len;
@@ -220,7 +347,7 @@ int get_url_content_ex(const char *url, const int url_len,
         }
         else {
             sprintf(error_info, "file: "__FILE__", line: %d, " \
-                    "recv data from %s:%d fail, errno: %d, " \
+                    "recv data from %s:%u fail, errno: %d, " \
                     "error info: %s", __LINE__, domain_name, \
                     port, result, STRERROR(result));
 
@@ -232,7 +359,7 @@ int get_url_content_ex(const char *url, const int url_len,
         if (pContent == NULL)
         {
             sprintf(error_info, "file: "__FILE__", line: %d, " \
-                    "response data from %s:%d is invalid", \
+                    "response data from %s:%u is invalid", \
                     __LINE__, domain_name, port);
 
             result = EINVAL;
@@ -244,7 +371,7 @@ int get_url_content_ex(const char *url, const int url_len,
         if (pSpace == NULL || pSpace >= pContent)
         {
             sprintf(error_info, "file: "__FILE__", line: %d, " \
-                    "response data from %s:%d is invalid", \
+                    "response data from %s:%u is invalid", \
                     __LINE__, domain_name, port);
 
             result = EINVAL;
@@ -253,9 +380,8 @@ int get_url_content_ex(const char *url, const int url_len,
 
         *http_status = atoi(pSpace + 1);
         *content_len -= pContent - *content;
-        memcpy(*content, pContent, *content_len);
+        memmove(*content, pContent, *content_len);
         *(*content + *content_len) = '\0';
-        *error_info = '\0';
     } while (0);
 
 	close(sock);
@@ -268,6 +394,8 @@ int get_url_content_ex(const char *url, const int url_len,
 
 	return result;
 }
+
+#endif
 
 int get_url_content(const char *url, const int connect_timeout, \
 	const int network_timeout, int *http_status, \

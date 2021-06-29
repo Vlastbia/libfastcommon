@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,6 +23,7 @@
 #include <sys/stat.h>
 #include "logger.h"
 #include "shared_func.h"
+#include "fc_memory.h"
 #include "fast_buffer.h"
 
 int fast_buffer_init_ex(FastBuffer *buffer, const int init_capacity)
@@ -21,11 +37,9 @@ int fast_buffer_init_ex(FastBuffer *buffer, const int init_capacity)
     {
         buffer->alloc_size = 256;
     }
-    buffer->data = (char *)malloc(buffer->alloc_size);
+    buffer->data = (char *)fc_malloc(buffer->alloc_size);
     if (buffer->data == NULL)
     {
-        logError("file: "__FILE__", line: %d, "
-             "malloc %d bytes fail", __LINE__, buffer->alloc_size);
         return ENOMEM;
     }
     *(buffer->data) = '\0';
@@ -42,32 +56,39 @@ void fast_buffer_destroy(FastBuffer *buffer)
     }
 }
 
-int fast_buffer_check(FastBuffer *buffer, const int inc_len)
+int fast_buffer_set_capacity(FastBuffer *buffer, const int capacity)
 {
     int alloc_size;
+    int new_capacity;
     char *buff;
 
-    if (buffer->alloc_size > buffer->length + inc_len)
-    {
-        return 0;
+    new_capacity = FC_MAX(capacity, buffer->length + 1);
+    if (buffer->alloc_size >= new_capacity) {
+        if (new_capacity > 1024) {
+            alloc_size = 2048;
+        } else if (new_capacity > 512) {
+            alloc_size = 1024;
+        } else if (new_capacity > 256) {
+            alloc_size = 512;
+        } else {
+            alloc_size = 256;
+        }
+    } else {
+        alloc_size = buffer->alloc_size * 2;
     }
-    alloc_size = buffer->alloc_size * 2;
-    while (alloc_size <= buffer->length + inc_len)
-    {
+
+    while (alloc_size < new_capacity) {
         alloc_size *= 2;
     }
 
-    buff = (char *)malloc(alloc_size);
-    if (buff == NULL)
-    {
-        logError("file: "__FILE__", line: %d, "
-             "malloc %d bytes fail", __LINE__, alloc_size);
+    buff = (char *)fc_malloc(alloc_size);
+    if (buff == NULL) {
         return ENOMEM;
     }
 
-    if (buffer->length > 0)
-    {
+    if (buffer->length > 0) {
         memcpy(buff, buffer->data, buffer->length);
+        *(buff + buffer->length) = '\0';
     }
 
     free(buffer->data);
@@ -97,7 +118,7 @@ int fast_buffer_append(FastBuffer *buffer, const char *format, ...)
     }
     else  //maybe full, realloc and try again
     {
-        if ((result=fast_buffer_check(buffer, len)) == 0)
+        if ((result=fast_buffer_check(buffer, len + 1)) == 0)
         {
             va_start(ap, format);
             buffer->length += vsnprintf(buffer->data + buffer->length,
@@ -120,7 +141,7 @@ int fast_buffer_append_buff(FastBuffer *buffer, const char *data, const int len)
     {
         return 0;
     }
-    if ((result=fast_buffer_check(buffer, len)) != 0)
+    if ((result=fast_buffer_check(buffer, len + 1)) != 0)
     {
         return result;
     }
@@ -128,6 +149,25 @@ int fast_buffer_append_buff(FastBuffer *buffer, const char *data, const int len)
     memcpy(buffer->data + buffer->length, data, len);
     buffer->length += len;
     *(buffer->data + buffer->length) = '\0';
+    return 0;
+}
+
+int fast_buffer_append_binary(FastBuffer *buffer,
+        const void *data, const int len)
+{
+    int result;
+
+    if (len <= 0)
+    {
+        return 0;
+    }
+    if ((result=fast_buffer_check(buffer, len)) != 0)
+    {
+        return result;
+    }
+
+    memcpy(buffer->data + buffer->length, data, len);
+    buffer->length += len;
     return 0;
 }
 

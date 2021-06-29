@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 //socketopt.h
 
@@ -17,9 +24,33 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netinet/tcp.h>
 #include "common_define.h"
 
-#define FAST_WRITE_BUFF_SIZE  256 * 1024
+#define FC_NET_TYPE_NONE          0
+#define FC_NET_TYPE_OUTER         1   //extranet IP
+#define FC_NET_TYPE_INNER         2   //intranet IP
+
+#define FC_SUB_NET_TYPE_INNER_10  (FC_NET_TYPE_INNER |  4)
+#define FC_SUB_NET_TYPE_INNER_172 (FC_NET_TYPE_INNER |  8)
+#define FC_SUB_NET_TYPE_INNER_192 (FC_NET_TYPE_INNER | 16)
+
+#define FC_NET_TYPE_ANY  (FC_NET_TYPE_OUTER | FC_NET_TYPE_INNER | \
+        FC_SUB_NET_TYPE_INNER_10 | FC_SUB_NET_TYPE_INNER_172 |    \
+        FC_SUB_NET_TYPE_INNER_192)
+
+#define NET_TYPE_ANY_STR            "any"
+#define NET_TYPE_OUTER_STR          "outer"
+#define NET_TYPE_INNER_STR          "inner"
+#define NET_TYPE_UNKOWN_STR         "UNKOWN"
+
+#define SUB_NET_TYPE_INNER_10_STR  "inner-10"
+#define SUB_NET_TYPE_INNER_172_STR "inner-172"
+#define SUB_NET_TYPE_INNER_192_STR "inner-192"
+
+#define FAST_WRITE_BUFF_SIZE  (256 * 1024)
 
 typedef struct fast_if_config {
     char name[IF_NAMESIZE];    //if name
@@ -52,8 +83,28 @@ typedef struct sockaddr_convert_s {
 #define SET_SOCKOPT_NOSIGPIPE(sock)
 #endif
 
+#ifdef OS_LINUX
+#define TCP_SET_QUICK_ACK(sock) \
+    do {  \
+        int quick_ack = 1; \
+        if (g_tcp_quick_ack && setsockopt(sock, IPPROTO_TCP,    \
+                    TCP_QUICKACK, &quick_ack, sizeof(int)) < 0) \
+        {  \
+            logError("file: "__FILE__", line: %d, " \
+                    "setsockopt failed, errno: %d, error info: %s", \
+                    __LINE__, errno, STRERROR(errno));  \
+        }  \
+    } while (0)
+#else
+#define TCP_SET_QUICK_ACK(sock)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
+#endif
+
+#ifdef OS_LINUX
+    extern bool g_tcp_quick_ack;
 #endif
 
 typedef int (*getnamefunc)(int socket, struct sockaddr *address, \
@@ -70,6 +121,12 @@ typedef int (*tcprecvdata_exfunc)(int sock, void *data, const int size, \
 
 #define getPeerIpaddr(sock, buff, bufferSize) \
 	getIpaddr(getpeername, sock, buff, bufferSize)
+
+#define getSockIpAddPort(sock, buff, bufferSize, port) \
+	getIpAndPort(getsockname, sock, buff, bufferSize, port)
+
+#define getPeerIpAddPort(sock, buff, bufferSize, port) \
+	getIpAndPort(getpeername, sock, buff, bufferSize, port)
 
 /** get a line from socket
  *  parameters:
@@ -144,7 +201,7 @@ int tcpsenddata_nb(int sock, void* data, const int size, const int timeout);
  *          server_port: port of the server
  *  return: error no, 0 success, != 0 fail
 */
-int connectserverbyip(int sock, const char *server_ip, const short server_port);
+int connectserverbyip(int sock, const char *server_ip, const uint16_t server_port);
 
 /** connect to server by non-block mode
  *  parameters:
@@ -156,7 +213,7 @@ int connectserverbyip(int sock, const char *server_ip, const short server_port);
  *  return: error no, 0 success, != 0 fail
 */
 int connectserverbyip_nb_ex(int sock, const char *server_ip, \
-		const short server_port, const int timeout, \
+		const uint16_t server_port, const int timeout, \
 		const bool auto_detect);
 
 /** connect to server by non-block mode, the socket must be set to non-block
@@ -180,6 +237,17 @@ int connectserverbyip_nb_ex(int sock, const char *server_ip, \
 */
 #define connectserverbyip_nb_auto(sock, server_ip, server_port, timeout) \
 	connectserverbyip_nb_ex(sock, server_ip, server_port, timeout, true)
+
+
+/** async connect to server
+ *  parameters:
+ *          sock: the non-block socket
+ *          server_ip: ip address of the server
+ *          server_port: port of the server
+ *  return: error no, 0 or EINPROGRESS for success, others for fail
+*/
+int asyncconnectserverbyip(int sock, const char *server_ip,
+        const uint16_t server_port);
 
 /** accept client connect request
  *  parameters:
@@ -238,6 +306,18 @@ int tcpprintkeepalive(int fd);
 */
 in_addr_t getIpaddr(getnamefunc getname, int sock, \
 		char *buff, const int bufferSize);
+
+/** get ip address
+ *  parameters:
+ *          getname: the function name, should be getpeername or getsockname
+ *          sock: the socket
+ *          buff: buffer to store the ip address
+ *          bufferSize: the buffer size (max bytes)
+ *          port: return the port
+ *  return: error no, 0 success, != 0 fail
+*/
+int getIpAndPort(getnamefunc getname, int sock,
+		char *buff, const int bufferSize, int *port);
 
 /** get hostname by it's ip address
  *  parameters:
@@ -329,30 +409,26 @@ int socketServer2(int af, const char *bind_ipaddr, const int port, int *err_no);
  *  parameters:
  *          af: family, AF_UNSPEC (auto dectect), AF_INET or AF_INET6
  *          server_ip: ip address of the server to detect family when af == AF_UNSPEC
- *          timeout: connect timeout in seconds
  *          flags: socket flags such as O_NONBLOCK for non-block socket
  *          bind_ipaddr: the ip address to bind, NULL or empty for bind ANY
  *          err_no: store the error no
  *  return: >= 0 server socket, < 0 fail
 */
 int socketCreateEx2(int af, const char *server_ip,
-		const int timeout, const int flags,
-        const char *bind_ipaddr, int *err_no);
+		const int flags, const char *bind_ipaddr, int *err_no);
 
 /** create socket (NOT connect to server yet)
  *  parameters:
  *          server_ip: ip address of the server to detect family
- *          timeout: connect timeout in seconds
  *          flags: socket flags such as O_NONBLOCK for non-block socket
  *          bind_ipaddr: the ip address to bind, NULL or empty for bind ANY
  *          err_no: store the error no
  *  return: >= 0 server socket, < 0 fail
 */
 static inline int socketCreateExAuto(const char *server_ip,
-		const int timeout, const int flags,
-        const char *bind_ipaddr, int *err_no)
+		const int flags, const char *bind_ipaddr, int *err_no)
 {
-    return socketCreateEx2(AF_UNSPEC, server_ip, timeout, flags,
+    return socketCreateEx2(AF_UNSPEC, server_ip, flags,
             bind_ipaddr, err_no);
 }
 
@@ -368,7 +444,7 @@ static inline int socketCreateExAuto(const char *server_ip,
  *  return: >= 0 server socket, < 0 fail
 */
 int socketClientEx2(int af, const char *server_ip,
-		const short server_port, const int timeout,
+		const uint16_t server_port, const int timeout,
 		const int flags, const char *bind_ipaddr, int *err_no);
 
 /** connect to server
@@ -382,7 +458,7 @@ int socketClientEx2(int af, const char *server_ip,
  *  return: >= 0 server socket, < 0 fail
 */
 static inline int socketClientExAuto(const char *server_ip,
-		const short server_port, const int timeout,
+		const uint16_t server_port, const int timeout,
 		const int flags, const char *bind_ipaddr, int *err_no)
 {
     return socketClientEx2(AF_UNSPEC, server_ip, server_port,
@@ -400,7 +476,7 @@ static inline int socketClientExAuto(const char *server_ip,
  *  return: >= 0 server socket, < 0 fail
 */
 static inline int socketClientAuto(const char *server_ip,
-		const short server_port, const int timeout,
+		const uint16_t server_port, const int timeout,
 		const int flags, int *err_no)
 {
     return socketClientEx2(AF_UNSPEC, server_ip, server_port,
@@ -418,7 +494,7 @@ static inline int socketClientAuto(const char *server_ip,
  *  return: >= 0 server socket, < 0 fail
 */
 static inline int socketClient2(int af, const char *server_ip,
-		const short server_port, const int timeout,
+		const uint16_t server_port, const int timeout,
 		const int flags, int *err_no)
 {
     return socketClientEx2(af, server_ip, server_port,
@@ -435,7 +511,7 @@ static inline int socketClient2(int af, const char *server_ip,
  *  return: >= 0 server socket, < 0 fail
 */
 static inline int socketClient(const char *server_ip,
-		const short server_port, const int timeout,
+		const uint16_t server_port, const int timeout,
 		const int flags, int *err_no)
 {
     return socketClient2(AF_INET, server_ip, server_port,
@@ -452,7 +528,7 @@ static inline int socketClient(const char *server_ip,
  *  return: >= 0 server socket, < 0 fail
 */
 static inline int socketClientIPv6(const char *server_ip,
-		const short server_port, const int timeout,
+		const uint16_t server_port, const int timeout,
 		const int flags, int *err_no)
 {
     return socketClient2(AF_INET6, server_ip, server_port,
@@ -565,7 +641,7 @@ int getifconfigs(FastIFConfig *if_configs, const int max_count, int *count);
  *          convert: the convert struct for IPv4 and IPv6 compatibility
  *  return: error no, 0 success, != 0 fail
 */
-int setsockaddrbyip(const char *ip, const short port, sockaddr_convert_t *convert);
+int setsockaddrbyip(const char *ip, const uint16_t port, sockaddr_convert_t *convert);
 
 static inline bool is_ipv6_addr(const char *ip)
 {
@@ -577,6 +653,56 @@ void tcp_set_try_again_when_interrupt(const bool value);
 static inline void tcp_dont_try_again_when_interrupt()
 {
     tcp_set_try_again_when_interrupt(false);
+}
+
+void tcp_set_quick_ack(const bool value);
+
+int fc_get_net_type_by_name(const char *net_type);
+
+int fc_get_net_type_by_ip(const char *ip);
+
+static inline bool is_network_error(const int err_no)
+{
+    switch (err_no)
+    {
+        case EPIPE:
+        case ENETDOWN:
+        case ENETUNREACH:
+        case ENETRESET:
+        case ECONNABORTED:
+        case ECONNRESET:
+        case ENOTCONN:
+        case ESHUTDOWN:
+        case ETIMEDOUT:
+        case ECONNREFUSED:
+        case EHOSTDOWN:
+        case EHOSTUNREACH:
+        case ENOTSOCK:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static inline const char *get_net_type_caption(const int net_type)
+{
+    switch (net_type)
+    {
+        case FC_NET_TYPE_ANY:
+            return NET_TYPE_ANY_STR;
+        case FC_NET_TYPE_OUTER:
+            return NET_TYPE_OUTER_STR;
+        case FC_NET_TYPE_INNER:
+            return NET_TYPE_INNER_STR;
+        case FC_SUB_NET_TYPE_INNER_10:
+            return SUB_NET_TYPE_INNER_10_STR;
+        case FC_SUB_NET_TYPE_INNER_172:
+            return SUB_NET_TYPE_INNER_172_STR;
+        case FC_SUB_NET_TYPE_INNER_192:
+            return SUB_NET_TYPE_INNER_192_STR;
+        default:
+            return NET_TYPE_UNKOWN_STR;
+    }
 }
 
 #ifdef __cplusplus

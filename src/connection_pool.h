@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 //connection_pool.h
 
@@ -16,9 +23,10 @@
 #include <string.h>
 #include <time.h>
 #include "common_define.h"
+#include "fast_mblock.h"
+#include "ini_file_reader.h"
 #include "pthread_func.h"
 #include "hash.h"
-#include "ini_file_reader.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,13 +36,21 @@ extern "C" {
     (strcmp((conn).ip_addr, target_ip) == 0 && \
      (conn).port == target_port)
 
+#define FC_CONNECTION_SERVER_EQUAL1(conn1, conn2)     \
+    (strcmp((conn1).ip_addr, (conn2).ip_addr) == 0 && \
+     (conn1).port == (conn2).port)
+
 typedef struct
 {
 	int sock;
-	int port;
+	uint16_t port;
+    short socket_domain;  //socket domain, AF_INET, AF_INET6 or AF_UNSPEC for auto dedect
+    bool validate_flag;   //for connection pool
 	char ip_addr[INET6_ADDRSTRLEN];
-    int socket_domain;  //socket domain, AF_INET, AF_INET6 or PF_UNSPEC for auto dedect
+    char args[0];   //for extra data
 } ConnectionInfo;
+
+typedef int (*fc_connection_callback_func)(ConnectionInfo *conn, void *args);
 
 struct tagConnectionManager;
 
@@ -59,12 +75,48 @@ typedef struct tagConnectionPool {
 	int max_count_per_entry;  //0 means no limit
 
 	/*
-	connections whose the idle time exceeds this time will be closed
+	connections whose idle time exceeds this time will be closed
     unit: second
 	*/
 	int max_idle_time;
     int socket_domain;  //socket domain
+
+    struct fast_mblock_man manager_allocator;
+    struct fast_mblock_man node_allocator;
+
+    struct {
+        fc_connection_callback_func func;
+        void *args;
+    } connect_done_callback;
+
+    struct {
+        fc_connection_callback_func func;
+        void *args;
+    } validate_callback;
 } ConnectionPool;
+
+/**
+*   init ex function
+*   parameters:
+*      cp: the ConnectionPool
+*      connect_timeout: the connect timeout in seconds
+*      max_count_per_entry: max connection count per host:port
+*      max_idle_time: reconnect the server after max idle time in seconds
+*      socket_domain: the socket domain
+*      htable_init_capacity: the init capacity of connection hash table
+*      connect_done_func: the connect done connection callback
+*      connect_done_args: the args for connect done connection callback
+*      validate_func: the validate connection callback
+*      validate_args: the args for validate connection callback
+*      extra_data_size: the extra data size of connection
+*   return 0 for success, != 0 for error
+*/
+int conn_pool_init_ex1(ConnectionPool *cp, int connect_timeout,
+	const int max_count_per_entry, const int max_idle_time,
+    const int socket_domain, const int htable_init_capacity,
+    fc_connection_callback_func connect_done_func, void *connect_done_args,
+    fc_connection_callback_func validate_func, void *validate_args,
+    const int extra_data_size);
 
 /**
 *   init ex function
@@ -76,9 +128,16 @@ typedef struct tagConnectionPool {
 *      socket_domain: the socket domain
 *   return 0 for success, != 0 for error
 */
-int conn_pool_init_ex(ConnectionPool *cp, int connect_timeout,
+static inline int conn_pool_init_ex(ConnectionPool *cp, int connect_timeout,
 	const int max_count_per_entry, const int max_idle_time,
-    const int socket_domain);
+    const int socket_domain)
+{
+    const int htable_init_capacity = 0;
+    const int extra_data_size = 0;
+    return conn_pool_init_ex1(cp, connect_timeout, max_count_per_entry,
+            max_idle_time, socket_domain, htable_init_capacity,
+            NULL, NULL, NULL, NULL, extra_data_size);
+}
 
 /**
 *   init function
@@ -89,8 +148,16 @@ int conn_pool_init_ex(ConnectionPool *cp, int connect_timeout,
 *      max_idle_time: reconnect the server after max idle time in seconds
 *   return 0 for success, != 0 for error
 */
-int conn_pool_init(ConnectionPool *cp, int connect_timeout,
-	const int max_count_per_entry, const int max_idle_time);
+static inline int conn_pool_init(ConnectionPool *cp, int connect_timeout,
+	const int max_count_per_entry, const int max_idle_time)
+{
+    const int socket_domain = AF_INET;
+    const int htable_init_capacity = 0;
+    const int extra_data_size = 0;
+    return conn_pool_init_ex1(cp, connect_timeout, max_count_per_entry,
+            max_idle_time, socket_domain, htable_init_capacity,
+            NULL, NULL, NULL, NULL, extra_data_size);
+}
 
 /**
 *   destroy function
@@ -180,6 +247,21 @@ static inline int conn_pool_connect_server_anyway(ConnectionInfo *pConnection,
 }
 
 /**
+*   async connect to the server
+*   parameters:
+*      pConnection: the connection
+*      bind_ipaddr: the ip address to bind, NULL or empty for any
+*   NOTE: pConnection->sock will be closed when it >= 0 before connect
+*   return 0 or EINPROGRESS for success, others for error
+*/
+int conn_pool_async_connect_server_ex(ConnectionInfo *conn,
+        const char *bind_ipaddr);
+
+#define conn_pool_async_connect_server(conn) \
+    conn_pool_async_connect_server_ex(conn, NULL)
+
+
+/**
 *   get connection count of the pool
 *   parameters:
 *      cp: the ConnectionPool
@@ -211,6 +293,34 @@ int conn_pool_load_server_info(IniContext *pIniContext, const char *filename,
 */
 int conn_pool_parse_server_info(const char *pServerStr,
         ConnectionInfo *pServerInfo, const int default_port);
+
+/**
+*   set server info with ip address and port
+*   parameters:
+*      pServerInfo: store server info
+*      ip_addr: the ip address
+*      port: the port
+*   return none
+*/
+static inline void conn_pool_set_server_info(ConnectionInfo *pServerInfo,
+        const char *ip_addr, const int port)
+{
+    snprintf(pServerInfo->ip_addr, sizeof(pServerInfo->ip_addr),
+            "%s", ip_addr);
+    pServerInfo->port = port;
+    pServerInfo->socket_domain = AF_UNSPEC;
+    pServerInfo->sock = -1;
+}
+
+static inline int conn_pool_compare_ip_and_port(const char *ip1,
+        const int port1, const char *ip2, const int port2)
+{
+    int result;
+    if ((result=strcmp(ip1, ip2)) != 0) {
+        return result;
+    }
+    return port1 - port2;
+}
 
 #ifdef __cplusplus
 }

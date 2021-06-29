@@ -4,7 +4,7 @@
 %define CommitVersion %(echo $COMMIT_VERSION)
 
 Name: libfastcommon
-Version: 1.0.41
+Version: 1.0.52
 Release: 1%{?dist}
 Summary: c common functions library extracted from my open source projects FastDFS
 License: LGPL
@@ -14,8 +14,8 @@ Source: http://github.com/happyfish100/libfastcommon/%{name}-%{version}.tar.gz
 
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n) 
 
-#Requires: /sbin/chkconfig
-#BuildRequires: perl %{_includedir}/linux/if.h gettext
+BuildRequires: libcurl-devel
+Requires: libcurl
 Requires: %__cp %__mv %__chmod %__grep %__mkdir %__install %__id
 
 %description
@@ -27,6 +27,7 @@ commit version: %{CommitVersion}
 
 %package devel
 Summary: Development header file
+Requires: libcurl-devel
 Requires: %{name}%{?_isa} = %{version}-%{release}
 
 %description devel
@@ -56,12 +57,11 @@ rm -rf %{buildroot}
 %files
 %defattr(-,root,root,-)
 /usr/lib64/libfastcommon.so*
-/usr/lib/libfastcommon.so*
 
 %files devel
 %defattr(-,root,root,-)
 /usr/include/fastcommon/*
 
 %changelog
-* Mon Jun 23 2014  Zaixue Liao <liaozaixue@yongche.com>
+* Mon Jun 23 2014  Zaixue Liao
 - first RPM release (1.0)

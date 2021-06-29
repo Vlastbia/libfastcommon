@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "sched_thread.h"
 #include "logger.h"
 #include "ioevent_loop.h"
@@ -7,18 +22,19 @@ static void deal_ioevents(IOEventPoller *ioevent)
 	int event;
 	IOEventEntry *pEntry;
 
-	for (ioevent->iterator.index=0; ioevent->iterator.index < ioevent->iterator.
-            count; ioevent->iterator.index++)
+	for (ioevent->iterator.index=0; ioevent->iterator.index < ioevent->
+            iterator.count; ioevent->iterator.index++)
 	{
 		event = IOEVENT_GET_EVENTS(ioevent, ioevent->iterator.index);
 		pEntry = (IOEventEntry *)IOEVENT_GET_DATA(ioevent,
                 ioevent->iterator.index);
         if (pEntry != NULL) {
-            pEntry->callback(pEntry->fd, event, pEntry->timer.data);
+            pEntry->callback(pEntry->fd, event, pEntry);
         }
         else {
             logDebug("file: "__FILE__", line: %d, "
-                    "ignore iovent : %d, index: %d", __LINE__, event, ioevent->iterator.index);
+                    "ignore ioevent : %d, index: %d",
+                    __LINE__, event, ioevent->iterator.index);
         }
 	}
 }
@@ -35,7 +51,7 @@ int ioevent_remove(IOEventPoller *ioevent, void *data)
 
     pEntry = (IOEventEntry *)IOEVENT_GET_DATA(ioevent,
             ioevent->iterator.index);
-    if (pEntry != NULL && pEntry->timer.data == data) {
+    if (pEntry != NULL && (void *)pEntry == data) {
         return 0;  //do NOT clear current entry
     }
 
@@ -43,9 +59,9 @@ int ioevent_remove(IOEventPoller *ioevent, void *data)
             index++)
     {
         pEntry = (IOEventEntry *)IOEVENT_GET_DATA(ioevent, index);
-        if (pEntry != NULL && pEntry->timer.data == data) {
+        if (pEntry != NULL && (void *)pEntry == data) {
             logDebug("file: "__FILE__", line: %d, "
-                    "clear iovent data: %p", __LINE__, data);
+                    "clear ioevent data: %p", __LINE__, data);
             IOEVENT_CLEAR_DATA(ioevent, index);
             return 0;
         }
@@ -67,23 +83,12 @@ static void deal_timeouts(FastTimerEntry *head)
 		entry = entry->next;
 
         current->prev = current->next = NULL; //must set NULL because NOT in time wheel
-		pEventEntry = (IOEventEntry *)current->data;
+		pEventEntry = (IOEventEntry *)current;
 		if (pEventEntry != NULL)
 		{
-			pEventEntry->callback(pEventEntry->fd, IOEVENT_TIMEOUT,
-						current->data);
+			pEventEntry->callback(pEventEntry->fd, IOEVENT_TIMEOUT, current);
 		}
 	}
-}
-
-void iovent_add_to_deleted_list(struct fast_task_info *pTask)
-{
-    if (pTask->thread_data == NULL) {
-        return;
-    }
-
-    pTask->next = pTask->thread_data->deleted_list;
-    pTask->thread_data->deleted_list = pTask;
 }
 
 int ioevent_loop(struct nio_thread_data *pThreadData,
@@ -91,15 +96,16 @@ int ioevent_loop(struct nio_thread_data *pThreadData,
 	clean_up_callback, volatile bool *continue_flag)
 {
 	int result;
-	IOEventEntry ev_notify;
+	struct ioevent_notify_entry ev_notify;
 	FastTimerEntry head;
-	struct fast_task_info *pTask;
+	struct fast_task_info *task;
 	time_t last_check_time;
 	int count;
 
 	memset(&ev_notify, 0, sizeof(ev_notify));
-	ev_notify.fd = pThreadData->pipe_fds[0];
-	ev_notify.callback = recv_notify_callback;
+	ev_notify.event.fd = FC_NOTIFY_READ_FD(pThreadData);
+	ev_notify.event.callback = recv_notify_callback;
+	ev_notify.thread_data = pThreadData;
 	if (ioevent_attach(&pThreadData->ev_puller,
 		pThreadData->pipe_fds[0], IOEVENT_READ,
 		&ev_notify) != 0)
@@ -116,7 +122,8 @@ int ioevent_loop(struct nio_thread_data *pThreadData,
 	last_check_time = g_current_time;
 	while (*continue_flag)
 	{
-		pThreadData->ev_puller.iterator.count = ioevent_poll(&pThreadData->ev_puller);
+		pThreadData->ev_puller.iterator.count = ioevent_poll(
+                &pThreadData->ev_puller);
 		if (pThreadData->ev_puller.iterator.count > 0)
 		{
 			deal_ioevents(&pThreadData->ev_puller);
@@ -139,13 +146,13 @@ int ioevent_loop(struct nio_thread_data *pThreadData,
 			count = 0;
 			while (pThreadData->deleted_list != NULL)
 			{
-				pTask = pThreadData->deleted_list;
-				pThreadData->deleted_list = pTask->next;
+				task = pThreadData->deleted_list;
+				pThreadData->deleted_list = task->next;
 
-				clean_up_callback(pTask);
+				clean_up_callback(task);
 				count++;
 			}
-			logDebug("cleanup task count: %d", count);
+			//logInfo("cleanup task count: %d", count);
 		}
 
 		if (g_current_time - last_check_time > 0)
@@ -159,7 +166,23 @@ int ioevent_loop(struct nio_thread_data *pThreadData,
 			}
 		}
 
-        if (pThreadData->thread_loop_callback != NULL) {
+        if (pThreadData->notify.enabled)
+        {
+            int64_t n;
+            if ((n=__sync_fetch_and_add(&pThreadData->notify.counter, 0)) != 0)
+            {
+                __sync_fetch_and_sub(&pThreadData->notify.counter, n);
+                /*
+                logInfo("file: "__FILE__", line: %d, "
+                        "n ==== %"PRId64", now: %"PRId64,
+                        __LINE__, n, __sync_fetch_and_add(
+                            &pThreadData->notify.counter, 0));
+                            */
+            }
+        }
+
+        if (pThreadData->thread_loop_callback != NULL)
+        {
             pThreadData->thread_loop_callback(pThreadData);
         }
 	}
@@ -167,16 +190,16 @@ int ioevent_loop(struct nio_thread_data *pThreadData,
 	return 0;
 }
 
-int ioevent_set(struct fast_task_info *pTask, struct nio_thread_data *pThread,
+int ioevent_set(struct fast_task_info *task, struct nio_thread_data *pThread,
 	int sock, short event, IOEventCallback callback, const int timeout)
 {
 	int result;
 
-	pTask->thread_data = pThread;
-	pTask->event.fd = sock;
-	pTask->event.callback = callback;
+	task->thread_data = pThread;
+	task->event.fd = sock;
+	task->event.callback = callback;
 	if (ioevent_attach(&pThread->ev_puller,
-		sock, event, pTask) < 0)
+		sock, event, task) < 0)
 	{
 		result = errno != 0 ? errno : ENOENT;
 		logError("file: "__FILE__", line: %d, " \
@@ -186,18 +209,7 @@ int ioevent_set(struct fast_task_info *pTask, struct nio_thread_data *pThread,
 		return result;
 	}
 
-	pTask->event.timer.data = pTask;
-	pTask->event.timer.expires = g_current_time + timeout;
-	result = fast_timer_add(&pThread->timer, &pTask->event.timer);
-	if (result != 0)
-	{
-		logError("file: "__FILE__", line: %d, " \
-			"fast_timer_add fail, " \
-			"errno: %d, error info: %s", \
-			__LINE__, result, STRERROR(result));
-		return result;
-	}
-
+	task->event.timer.expires = g_current_time + timeout;
+	fast_timer_add(&pThread->timer, &task->event.timer);
 	return 0;
 }
-

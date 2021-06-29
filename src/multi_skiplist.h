@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2015 Happy Fish / YuQing
-*
-* libfastcommon may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 //multi_skiplist.h, support duplicated entries, and support stable sort  :)
 
@@ -75,6 +82,7 @@ int multi_skiplist_find_all(MultiSkiplist *sl, void *data,
         MultiSkiplistIterator *iterator);
 int multi_skiplist_find_range(MultiSkiplist *sl, void *start_data, void *end_data,
         MultiSkiplistIterator *iterator);
+void *multi_skiplist_find_ge(MultiSkiplist *sl, void *data);
 
 static inline void multi_skiplist_iterator(MultiSkiplist *sl,
         MultiSkiplistIterator *iterator)
@@ -107,6 +115,15 @@ static inline void *multi_skiplist_next(MultiSkiplistIterator *iterator)
     data = iterator->current.data->data;
     iterator->current.data = iterator->current.data->next;
     return data;
+}
+
+static inline void *multi_skiplist_get_first(MultiSkiplist *sl)
+{
+    if (sl->top->links[0] != sl->tail) {
+        return sl->top->links[0]->head->data;
+    } else {
+        return NULL;
+    }
 }
 
 static inline bool multi_skiplist_empty(MultiSkiplist *sl)

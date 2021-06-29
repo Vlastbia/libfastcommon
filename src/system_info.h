@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #ifndef SYSTEM_INFO_H
 #define SYSTEM_INFO_H
@@ -153,7 +160,15 @@ int get_mounted_filesystems(struct fast_statfs *stats,
 */
 int get_processes(struct fast_process_info **processes, int *count);
 
-int get_sysinfo(struct fast_sysinfo*info);
+int get_sysinfo(struct fast_sysinfo *info);
+
+int get_kernel_version(Version *version);
+
+#ifdef OS_LINUX
+int get_device_block_size(const char *device, int *block_size);
+int get_path_block_size(const char *path, int *block_size);
+#endif
+
 #endif
 
 #ifdef __cplusplus

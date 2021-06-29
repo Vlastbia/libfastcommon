@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2015 Happy Fish / YuQing
-*
-* libfastcommon may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 //skiplist.h, support stable sort  :)
 
@@ -186,13 +193,16 @@ static inline void skiplist_iterator(Skiplist *sl, SkiplistIterator *iterator)
     iterator->type = sl->type;
     switch (sl->type) {
         case SKIPLIST_TYPE_FLAT:
-            return flat_skiplist_iterator(&sl->u.flat, &iterator->u.flat);
+            flat_skiplist_iterator(&sl->u.flat, &iterator->u.flat);
+            break;
         case SKIPLIST_TYPE_MULTI:
-            return multi_skiplist_iterator(&sl->u.multi, &iterator->u.multi);
+            multi_skiplist_iterator(&sl->u.multi, &iterator->u.multi);
+            break;
         case SKIPLIST_TYPE_SET:
-            return skiplist_set_iterator(&sl->u.set, &iterator->u.set);
+            skiplist_set_iterator(&sl->u.set, &iterator->u.set);
+            break;
         default:
-            return EINVAL;
+            break;
     }
 }
 

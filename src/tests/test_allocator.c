@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,7 +58,7 @@ int main(int argc, char *argv[])
 	g_log_context.log_level = LOG_DEBUG;
 	
 	fast_mblock_manager_init();
-	if ((result=fast_allocator_init(&acontext, 0, 0.00, 0, true)) != 0)
+	if ((result=fast_allocator_init(&acontext, NULL, 0, 0.00, 0, true)) != 0)
 	{
 		return result;
 	}

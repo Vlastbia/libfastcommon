@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #include <time.h>
 #include <stdio.h>
@@ -16,17 +23,20 @@
 #include <inttypes.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
 #include <netinet/in.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <dirent.h>
 #include "logger.h"
 #include "shared_func.h"
+#include "fc_memory.h"
 #include "system_info.h"
 
 #ifdef OS_LINUX
 #include <sys/sysinfo.h>
 #include <sys/vfs.h>
+#include <sys/sysmacros.h>
 #else
 #ifdef OS_FREEBSD
 #include <sys/sysctl.h>
@@ -327,11 +337,9 @@ static int check_process_capacity(FastProcessArray *proc_array)
     alloc_size = proc_array->alloc_size > 0 ?
         proc_array->alloc_size * 2 : 128;
     bytes = sizeof(struct fast_process_info) * alloc_size;
-    procs = (struct fast_process_info *)malloc(bytes);
+    procs = (struct fast_process_info *)fc_malloc(bytes);
     if (procs == NULL)
     {
-		logError("file: "__FILE__", line: %d, "
-			 "malloc %d bytes fail", __LINE__, bytes);
         return ENOMEM;
     }
 
@@ -540,7 +548,7 @@ int get_processes(struct fast_process_info **processes, int *count)
     return result;
 }
 
-int get_sysinfo(struct fast_sysinfo*info)
+int get_sysinfo(struct fast_sysinfo *info)
 {
     struct sysinfo si;
 
@@ -632,14 +640,10 @@ int get_processes(struct fast_process_info **processes, int *count)
         }
 
         size = sizeof(struct kinfo_proc) * nproc;
-        procs = (struct kinfo_proc *)malloc(size);
+        procs = (struct kinfo_proc *)fc_malloc(size);
         if (procs == NULL)
         {
-            logError("file: "__FILE__", line: %d, " \
-                    "malloc %d bytes fail, " \
-                    "errno: %d, error info: %s", \
-                    __LINE__, (int)size, errno, STRERROR(errno));
-            return errno != 0 ? errno : ENOMEM;
+            return ENOMEM;
         }
 
         if (sysctl(mib, 4, procs, &size, NULL, 0) == 0)
@@ -668,11 +672,9 @@ int get_processes(struct fast_process_info **processes, int *count)
     nproc = size / sizeof(struct kinfo_proc);
 
     bytes = sizeof(struct fast_process_info) * nproc;
-    *processes = (struct fast_process_info *)malloc(bytes);
+    *processes = (struct fast_process_info *)fc_malloc(bytes);
     if (*processes == NULL)
     {
-		logError("file: "__FILE__", line: %d, "
-			 "malloc %d bytes fail", __LINE__, bytes);
         free(procs);
         return ENOMEM;
     }
@@ -704,7 +706,7 @@ int get_processes(struct fast_process_info **processes, int *count)
     return 0;
 }
 
-int get_sysinfo(struct fast_sysinfo*info)
+int get_sysinfo(struct fast_sysinfo *info)
 {
         int mib[4];
         size_t size;
@@ -785,7 +787,7 @@ int get_sysinfo(struct fast_sysinfo*info)
 	if (sysctl(mib, 2, &sw_usage, &size, NULL, 0) != 0)
 	{
 		logError("file: "__FILE__", line: %d, " \
-			"call sysctl  fail, " \
+			"call sysctl fail, " \
 			"errno: %d, error info: %s", \
 			__LINE__, errno, STRERROR(errno));
 	}
@@ -802,3 +804,156 @@ int get_sysinfo(struct fast_sysinfo*info)
 #endif
 #endif
 
+int get_kernel_version(Version *version)
+{
+    struct utsname name;
+    char *p;
+    int numbers[2];
+    int i;
+
+    if (uname(&name) < 0)
+    {
+		logError("file: "__FILE__", line: %d, "
+			"call uname fail, errno: %d, error info: %s",
+			__LINE__, errno, STRERROR(errno));
+        return errno != 0 ? errno : EFAULT;
+    }
+
+    numbers[0] = numbers[1] = 0;
+    p = name.release;
+    for (i=0; i<2; i++) {
+        p = strchr(p, '.');
+        if (p == NULL) {
+            break;
+        }
+
+        p++;
+        numbers[i] = strtol(p, NULL, 10);
+    }
+
+    version->major = strtol(name.release, NULL, 10);
+    version->minor = numbers[0];
+    version->patch = numbers[1];
+    return 0;
+}
+
+#ifdef OS_LINUX
+int get_device_block_size(const char *device, int *block_size)
+{
+    int result;
+    int fd;
+    size_t bs;
+
+    if ((fd=open(device, O_RDONLY)) < 0) {
+        result = errno != 0 ? errno : ENOENT;
+        logError("file: "__FILE__", line: %d, "
+                "open device %s fail, errno: %d, error info: %s",
+                __LINE__, device, result, strerror(result));
+        return result;
+    }
+
+    if (ioctl(fd, BLKSSZGET, &bs) == 0) {
+        *block_size = bs;
+        result = 0;
+    } else {
+        result = errno != 0 ? errno : EPERM;
+        logError("file: "__FILE__", line: %d, "
+                "ioctl device %s fail, errno: %d, error info: %s",
+                __LINE__, device, result, strerror(result));
+    }
+
+    close(fd);
+    return result;
+}
+
+static int get_block_size_by_write(const char *path, int *block_size)
+{
+#define MAX_BLK_SIZE  (128 * 1024)
+    char tmp_filename[PATH_MAX];
+    char *buff;
+    int result;
+    int fd;
+
+    if ((result=posix_memalign((void **)&buff,
+                    MAX_BLK_SIZE, MAX_BLK_SIZE)) != 0)
+    {
+        logError("file: "__FILE__", line: %d, "
+                "posix_memalign %d bytes fail, "
+                "errno: %d, error info: %s", __LINE__,
+                MAX_BLK_SIZE, result, STRERROR(result));
+        return result;
+    }
+
+    snprintf(tmp_filename, sizeof(tmp_filename),
+            "%s/.blksize-test.tmp", path);
+    if ((fd=open(tmp_filename, O_WRONLY | O_CREAT | O_DIRECT)) < 0) {
+        result = errno != 0 ? errno : ENOENT;
+        logError("file: "__FILE__", line: %d, "
+                "open file %s fail, errno: %d, error info: %s",
+                __LINE__, tmp_filename, result, strerror(result));
+        free(buff);
+        return result;
+    }
+
+    result = EINVAL;
+    *block_size = 512;
+    while (*block_size <= MAX_BLK_SIZE) {
+        if (write(fd, buff, *block_size) == *block_size) {
+            result = 0;
+            break;
+        }
+        result = errno != 0 ? errno : EINTR;
+        if (result == EINTR) {
+            continue;
+        }
+
+        if (result != EINVAL) {
+            logError("file: "__FILE__", line: %d, "
+                    "write to file %s fail, errno: %d, error info: %s",
+                    __LINE__, tmp_filename, result, strerror(result));
+            break;
+        }
+
+        *block_size *= 2;
+    }
+
+    free(buff);
+    close(fd);
+    unlink(tmp_filename);
+    return result;
+}
+
+int get_path_block_size(const char *path, int *block_size)
+{
+    char dev_path[64];
+    struct stat statbuf;
+    int result;
+
+    if (stat(path, &statbuf) != 0) {
+        result = errno != 0 ? errno : EPERM;
+        logError("file: "__FILE__", line: %d, "
+                "stat %s fail, errno: %d, error info: %s",
+                __LINE__, path, result, strerror(result));
+        return result;
+    }
+
+    if (S_ISBLK(statbuf.st_mode)) {
+        return get_device_block_size(path, block_size);
+    }
+    if (!S_ISDIR(statbuf.st_mode)) {
+        logError("file: "__FILE__", line: %d, "
+                "%s is NOT a directory!", __LINE__, path);
+        return ENOTDIR;
+    }
+
+    sprintf(dev_path, "/dev/block/%d:%d", (int)major(statbuf.st_dev),
+            (int)minor(statbuf.st_dev));
+    if (access(dev_path, R_OK) == 0) {
+        if ((result=get_device_block_size(dev_path, block_size)) == 0) {
+            return 0;
+        }
+    }
+
+    return get_block_size_by_write(path, block_size);
+}
+#endif

@@ -1,16 +1,24 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include "chain.h"
+#include "fc_memory.h"
 //#include "use_mmalloc.h"
 
 void chain_init(ChainList *pList, const int type, FreeDataFunc freeDataFunc, \
@@ -69,7 +77,7 @@ int insertNodePrior(ChainList *pList, void *data)
 		return EINVAL;
 	}
 
-	pNode = (ChainNode *)malloc(sizeof(ChainNode));
+	pNode = (ChainNode *)fc_malloc(sizeof(ChainNode));
 	if (pNode == NULL)
 	{
 		return ENOMEM;
@@ -95,7 +103,7 @@ int appendNode(ChainList *pList, void *data)
 		return EINVAL;
 	}
 
-	pNode = (ChainNode *)malloc(sizeof(ChainNode));
+	pNode = (ChainNode *)fc_malloc(sizeof(ChainNode));
 	if (pNode == NULL)
 	{
 		return ENOMEM;
@@ -128,7 +136,7 @@ int insertNodeAsc(ChainList *pList, void *data)
 		return EINVAL;
 	}
 
-	pNew = (ChainNode *)malloc(sizeof(ChainNode));
+	pNew = (ChainNode *)fc_malloc(sizeof(ChainNode));
 	if (pNew == NULL)
 	{
 		return ENOMEM;

@@ -1,10 +1,17 @@
-/**
-* Copyright (C) 2008 Happy Fish / YuQing
-*
-* FastDFS may be copied only under the terms of the GNU General
-* Public License V3, which may be found in the FastDFS source kit.
-* Please visit the FastDFS Home Page http://www.csource.org/ for more detail.
-**/
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 //ini_file_reader.c
 
@@ -19,6 +26,8 @@
 #include "logger.h"
 #include "http_func.h"
 #include "local_ip_func.h"
+#include "pthread_func.h"
+#include "fc_memory.h"
 #include "ini_file_reader.h"
 
 #define _LINE_BUFFER_SIZE	   512
@@ -53,15 +62,15 @@
 #define _PREPROCESS_TAG_STR_FOR_STEP   "step"
 #define _PREPROCESS_TAG_LEN_FOR_STEP   (sizeof(_PREPROCESS_TAG_STR_FOR_STEP) - 1)
 
-#define _MAX_DYNAMIC_CONTENTS     8
-#define _BUILTIN_ANNOTATION_COUNT 3
+#define _INIT_DYNAMIC_CONTENTS     8
+#define _BUILTIN_ANNOTATION_COUNT  3
 
 static AnnotationEntry *g_annotations = NULL;
 static int g_annotation_count = 0;
 
 typedef struct {
     int count;
-    int alloc_count;
+    int alloc;
     char **contents;
 } DynamicContents;
 
@@ -72,7 +81,7 @@ typedef struct {
 
 typedef struct {
     int count;
-    int alloc_count;
+    int alloc;
     AnnotationEntry *annotations;
 } DynamicAnnotations;
 
@@ -84,11 +93,17 @@ typedef struct {
     DynamicAnnotations dynamicAnnotations;
 } CDCPair;
 
+typedef struct {
+    volatile int init_counter;
+    int alloc;
+    int count;
+    int index;
+    CDCPair *contents;
+    pthread_mutex_t lock;
+} DynamicContentArray;
+
 //dynamic alloced contents which will be freed when destroy
-static int g_dynamic_content_count = 0;
-static int g_dynamic_content_index = 0;
-static CDCPair g_dynamic_contents[_MAX_DYNAMIC_CONTENTS] = {{false, NULL,
-    {0, 0, NULL}, {0, NULL}, {0, 0, NULL}}};
+static DynamicContentArray g_dynamic_content_array = {0, 0, 0, 0, NULL};
 
 static int remallocSection(IniSection *pSection, IniItem **pItem);
 static int iniDoLoadFromFile(const char *szFilename, \
@@ -105,6 +120,10 @@ static SetDirectiveVars *iniGetVars(IniContext *pContext);
         trim_right(pStr); \
         trim_left(pStr);  \
     } while (0)
+
+
+#define RETRY_FETCH_GLOBAL(szSectionName, bRetryGlobal) \
+        ((szSectionName != NULL && *szSectionName != '\0') && bRetryGlobal)
 
 static void iniDoSetAnnotations(AnnotationEntry *src, const int src_count,
         AnnotationEntry *dest, int *dest_count)
@@ -238,11 +257,8 @@ static int iniAnnotationFuncShellExec(IniContext *context,
     char *output;
 
     count = 0;
-    output = (char *)malloc(FAST_INI_ITEM_VALUE_SIZE);
+    output = (char *)fc_malloc(FAST_INI_ITEM_VALUE_SIZE);
     if (output == NULL) {
-        logError("file: "__FILE__", line: %d, "
-                "malloc %d bytes fail",
-                __LINE__, FAST_INI_ITEM_VALUE_LEN + 1);
         return count;
     }
 
@@ -303,11 +319,8 @@ static char *doReplaceVars(IniContext *pContext, const char *param,
     int name_len;
     int len;
 
-    output = (char *)malloc(max_size);
+    output = (char *)fc_malloc(max_size);
     if (output == NULL) {
-        logError("file: "__FILE__", line: %d, "
-                "malloc %d bytes fail",
-                __LINE__, FAST_INI_ITEM_VALUE_SIZE);
         return NULL;
     }
 
@@ -486,12 +499,9 @@ int iniSetAnnotationCallBack(AnnotationEntry *annotations, int count)
     }
 
     bytes = sizeof(AnnotationEntry) * (g_annotation_count + count + 1);
-    g_annotations = (AnnotationEntry *)realloc(g_annotations, bytes);
+    g_annotations = (AnnotationEntry *)fc_realloc(g_annotations, bytes);
     if (g_annotations == NULL)
     {
-		logError("file: "__FILE__", line: %d, "
-			"realloc %d fail, errno: %d, error info: %s",
-			__LINE__, bytes, errno, STRERROR(errno));
         return ENOMEM;
     }
 
@@ -586,6 +596,13 @@ int iniLoadFromFile(const char *szFilename, IniContext *pContext)
             NULL, 0, FAST_INI_FLAGS_NONE);
 }
 
+int iniLoadFromFile1(const char *szFilename,
+        IniContext *pContext, const char flags)
+{
+    return iniLoadFromFileEx(szFilename, pContext,
+            FAST_INI_ANNOTATION_WITH_BUILTIN, NULL, 0, flags);
+}
+
 static void iniDestroyAnnotations(const int old_annotation_count)
 {
     AnnotationEntry *pAnnoEntry;
@@ -630,7 +647,7 @@ int iniLoadFromFileEx(const char *szFilename, IniContext *pContext,
 	int result;
 	int len;
 	char *pLast;
-	char full_filename[MAX_PATH_SIZE];
+	char full_filename[PATH_MAX];
     int old_annotation_count;
 
 	if ((result=iniInitContext(pContext, annotation_type,
@@ -639,13 +656,18 @@ int iniLoadFromFileEx(const char *szFilename, IniContext *pContext,
 		return result;
 	}
 
-	if (strncasecmp(szFilename, "http://", 7) == 0)
+	if (IS_URL_RESOURCE(szFilename))
 	{
 		*pContext->config_path = '\0';
-		snprintf(full_filename, sizeof(full_filename),"%s",szFilename);
+		snprintf(full_filename, sizeof(full_filename), "%s", szFilename);
 	}
 	else
 	{
+        if (IS_FILE_RESOURCE(szFilename))
+        {
+            szFilename += FILE_RESOURCE_TAG_LEN;
+        }
+
 		if (*szFilename == '/')
 		{
 			pLast = strrchr(szFilename, '/');
@@ -741,7 +763,7 @@ static int iniDoLoadFromFile(const char *szFilename, \
 	int64_t file_size;
 	char error_info[512];
 
-	if (strncasecmp(szFilename, "http://", 7) == 0)
+	if (IS_URL_RESOURCE(szFilename))
 	{
 		if ((result=get_url_content(szFilename, 10, 60, &http_status, \
 				&content, &content_len, error_info)) != 0)
@@ -816,6 +838,11 @@ int iniLoadFromBuffer(char *content, IniContext *pContext)
             NULL, 0, FAST_INI_FLAGS_NONE);
 }
 
+int iniLoadFromBuffer1(char *content, IniContext *pContext, const char flags)
+{
+    return iniLoadFromBufferEx(content, pContext,
+            FAST_INI_ANNOTATION_WITH_BUILTIN, NULL, 0, flags);
+}
 
 typedef int (*init_annotation_func0)(AnnotationEntry *annotation);
 typedef int (*init_annotation_func1)(AnnotationEntry *annotation,
@@ -950,10 +977,11 @@ static int iniDoLoadItemsFromBuffer(char *content, IniContext *pContext)
 	char *pEqualChar;
     char pItemName[FAST_INI_ITEM_NAME_LEN + 1];
     char *pAnnoItemLine;
-	char *pIncludeFilename;
+	char pIncludeFilename[PATH_MAX];
+	char *pTrueFilename;
     char *pItemValues[100];
     char pFuncName[FAST_INI_ITEM_NAME_LEN + 1];
-	char full_filename[MAX_PATH_SIZE];
+	char full_filename[PATH_MAX];
     int i;
 	int nLineLen;
 	int nNameLen;
@@ -992,34 +1020,35 @@ static int iniDoLoadItemsFromBuffer(char *content, IniContext *pContext)
 			strncasecmp(pLine+1, "include", 7) == 0 && \
 			(*(pLine+8) == ' ' || *(pLine+8) == '\t'))
 		{
-			pIncludeFilename = strdup(pLine + 9);
-			if (pIncludeFilename == NULL)
-			{
-				logError("file: "__FILE__", line: %d, " \
-					"strdup %d bytes fail", __LINE__, \
-					(int)strlen(pLine + 9) + 1);
-				result = errno != 0 ? errno : ENOMEM;
-				break;
-			}
-
+            snprintf(pIncludeFilename, sizeof(pIncludeFilename),
+                    "%s", pLine + 9);
 			STR_TRIM(pIncludeFilename);
-			if (strncasecmp(pIncludeFilename, "http://", 7) == 0)
+			if (IS_URL_RESOURCE(pIncludeFilename))
 			{
-				snprintf(full_filename, sizeof(full_filename),\
+				snprintf(full_filename, sizeof(full_filename),
 					"%s", pIncludeFilename);
 			}
 			else
 			{
-				if (*pIncludeFilename == '/')
+                if (IS_FILE_RESOURCE(pIncludeFilename))
+                {
+                    pTrueFilename = pIncludeFilename + FILE_RESOURCE_TAG_LEN;
+                }
+                else
+                {
+                    pTrueFilename = pIncludeFilename;
+                }
+
+                if (*pTrueFilename == '/')
 				{
 				snprintf(full_filename, sizeof(full_filename), \
-					"%s", pIncludeFilename);
+					"%s", pTrueFilename);
 				}
 				else
 				{
 				snprintf(full_filename, sizeof(full_filename), \
 					"%s/%s", pContext->config_path, \
-					 pIncludeFilename);
+					 pTrueFilename);
 				}
 
 				if (!fileExists(full_filename))
@@ -1027,8 +1056,7 @@ static int iniDoLoadItemsFromBuffer(char *content, IniContext *pContext)
 				logError("file: "__FILE__", line: %d, " \
 					"include file \"%s\" not exists, " \
 					"line: \"%s\"", __LINE__, \
-					pIncludeFilename, pLine);
-				free(pIncludeFilename);
+					pTrueFilename, pLine);
 				result = ENOENT;
 				break;
 				}
@@ -1038,7 +1066,6 @@ static int iniDoLoadItemsFromBuffer(char *content, IniContext *pContext)
 			result = iniDoLoadFromFile(full_filename, pContext);
 			if (result != 0)
 			{
-				free(pIncludeFilename);
 				break;
 			}
 
@@ -1046,7 +1073,6 @@ static int iniDoLoadItemsFromBuffer(char *content, IniContext *pContext)
 			pSection = pContext->current_section;
             pItem = pSection->items + pSection->count;  //must re-asign
 
-			free(pIncludeFilename);
 			continue;
 		}
         else if (*pLine == '#')
@@ -1120,17 +1146,10 @@ static int iniDoLoadItemsFromBuffer(char *content, IniContext *pContext)
 					section_name, section_len);
 			if (pSection == NULL)
 			{
-				pSection = (IniSection *)malloc(sizeof(IniSection));
+				pSection = (IniSection *)fc_malloc(sizeof(IniSection));
 				if (pSection == NULL)
 				{
-					result = errno != 0 ? errno : ENOMEM;
-					logError("file: "__FILE__", line: %d, "\
-						"malloc %d bytes fail, " \
-						"errno: %d, error info: %s", \
-						__LINE__, \
-						(int)sizeof(IniSection), \
-						result, STRERROR(result));
-
+					result = ENOMEM;
 					break;
 				}
 
@@ -1152,6 +1171,14 @@ static int iniDoLoadItemsFromBuffer(char *content, IniContext *pContext)
 					result = 0;
 				}
 			}
+            else if ((pContext->flags & FAST_INI_FLAGS_DISABLE_SAME_SECTION_MERGE) != 0)
+            {
+                result = EEXIST;
+                logError("file: "__FILE__", line: %d, "
+                        "section [%s] already exist",
+                        __LINE__, section_name);
+                break;
+            }
 
 			pContext->current_section = pSection;
             pItem = pSection->items + pSection->count;
@@ -1186,7 +1213,7 @@ static int iniDoLoadItemsFromBuffer(char *content, IniContext *pContext)
 			nValueLen = FAST_INI_ITEM_VALUE_LEN;
 		}
 
-		if (pSection->count >= pSection->alloc_count)
+		if (pSection->count >= pSection->alloc)
         {
             result = remallocSection(pSection, &pItem);
             if (result != 0)
@@ -1292,7 +1319,7 @@ static int iniDoLoadItemsFromBuffer(char *content, IniContext *pContext)
                 pItem->value[nValueLen] = '\0';
                 pSection->count++;
                 pItem++;
-                if (pSection->count >= pSection->alloc_count)
+                if (pSection->count >= pSection->alloc)
                 {
                     result = remallocSection(pSection, &pItem);
                     if (result != 0)
@@ -1323,27 +1350,88 @@ static int iniDoLoadItemsFromBuffer(char *content, IniContext *pContext)
 	return result;
 }
 
+static inline int checkInitDynamicContentArray()
+{
+    if (__sync_fetch_and_add(&g_dynamic_content_array.init_counter, 1) != 0)
+    {
+        return 0;
+    }
+    return init_pthread_lock(&g_dynamic_content_array.lock);
+}
+
+static int checkAllocDynamicContentArray()
+{
+    CDCPair *contents;
+    int alloc;
+    int bytes;
+
+    if (g_dynamic_content_array.alloc > g_dynamic_content_array.count)
+    {
+        return 0;
+    }
+
+    alloc = (g_dynamic_content_array.alloc == 0) ? _INIT_DYNAMIC_CONTENTS :
+        g_dynamic_content_array.alloc * 2;
+    bytes = sizeof(CDCPair) * alloc;
+    contents = (CDCPair *)fc_malloc(bytes);
+    if (contents == NULL)
+    {
+        return ENOMEM;
+    }
+    memset(contents, 0, bytes);
+
+    if (g_dynamic_content_array.alloc > 0)
+    {
+        memcpy(contents, g_dynamic_content_array.contents,
+                sizeof(CDCPair) * g_dynamic_content_array.alloc);
+        free(g_dynamic_content_array.contents);
+    }
+
+    g_dynamic_content_array.contents = contents;
+    g_dynamic_content_array.alloc = alloc;
+    return 0;
+}
+
 static CDCPair *iniGetCDCPair(IniContext *pContext)
 {
     int i;
-    if (g_dynamic_contents[g_dynamic_content_index].context == pContext)
+    CDCPair *pair;
+
+    if (checkInitDynamicContentArray() != 0)
     {
-        return g_dynamic_contents + g_dynamic_content_index;
+        return NULL;
     }
 
-    if (g_dynamic_content_count > 0)
+    pthread_mutex_lock(&g_dynamic_content_array.lock);
+    if (g_dynamic_content_array.contents == NULL)
     {
-        for (i=0; i<_MAX_DYNAMIC_CONTENTS; i++)
+        pair = NULL;
+    }
+    else if (g_dynamic_content_array.contents[g_dynamic_content_array.index].
+            context == pContext)
+    {
+        pair = g_dynamic_content_array.contents + g_dynamic_content_array.index;
+    }
+    else
+    {
+        pair = NULL;
+        if (g_dynamic_content_array.count > 0)
         {
-            if (g_dynamic_contents[i].context == pContext)
+            for (i=0; i<g_dynamic_content_array.alloc; i++)
             {
-                g_dynamic_content_index = i;
-                return g_dynamic_contents + g_dynamic_content_index;
+                if (g_dynamic_content_array.contents[i].context == pContext)
+                {
+                    g_dynamic_content_array.index = i;
+                    pair = g_dynamic_content_array.contents +
+                        g_dynamic_content_array.index;
+                    break;
+                }
             }
         }
     }
+    pthread_mutex_unlock(&g_dynamic_content_array.lock);
 
-    return NULL;
+    return pair;
 }
 
 static CDCPair *iniAllocCDCPair(IniContext *pContext)
@@ -1355,29 +1443,35 @@ static CDCPair *iniAllocCDCPair(IniContext *pContext)
         return pair;
     }
 
-    if (g_dynamic_content_count == _MAX_DYNAMIC_CONTENTS)
-    {
-        return NULL;
-    }
-
-    for (i=0; i<_MAX_DYNAMIC_CONTENTS; i++)
-    {
-        if (!g_dynamic_contents[i].used)
+    pthread_mutex_lock(&g_dynamic_content_array.lock);
+    do {
+        if (checkAllocDynamicContentArray() != 0)
         {
-            g_dynamic_contents[i].used = true;
-            g_dynamic_contents[i].context = pContext;
-            g_dynamic_content_index = i;
-            g_dynamic_content_count++;
-            return g_dynamic_contents + g_dynamic_content_index;
+            break;
         }
-    }
 
-    return NULL;
+        for (i=0; i<g_dynamic_content_array.alloc; i++)
+        {
+            if (!g_dynamic_content_array.contents[i].used)
+            {
+                g_dynamic_content_array.contents[i].used = true;
+                g_dynamic_content_array.contents[i].context = pContext;
+                g_dynamic_content_array.index = i;
+                g_dynamic_content_array.count++;
+                pair = g_dynamic_content_array.contents +
+                    g_dynamic_content_array.index;
+                break;
+            }
+        }
+    } while (0);
+    pthread_mutex_unlock(&g_dynamic_content_array.lock);
+
+    return pair;
 }
 
 static DynamicContents *iniAllocDynamicContent(IniContext *pContext)
 {
-    static CDCPair *pair;
+    CDCPair *pair;
 
     pair = iniAllocCDCPair(pContext);
     if (pair == NULL)
@@ -1389,7 +1483,7 @@ static DynamicContents *iniAllocDynamicContent(IniContext *pContext)
 
 static SetDirectiveVars *iniGetVars(IniContext *pContext)
 {
-    static CDCPair *pair;
+    CDCPair *pair;
 
     pair = iniGetCDCPair(pContext);
     if (pair == NULL)
@@ -1401,7 +1495,7 @@ static SetDirectiveVars *iniGetVars(IniContext *pContext)
 
 static DynamicAnnotations *iniAllocDynamicAnnotation(IniContext *pContext)
 {
-    static CDCPair *pair;
+    CDCPair *pair;
 
     pair = iniAllocCDCPair(pContext);
     if (pair == NULL)
@@ -1413,7 +1507,7 @@ static DynamicAnnotations *iniAllocDynamicAnnotation(IniContext *pContext)
 
 static AnnotationEntry *iniGetAnnotations(IniContext *pContext)
 {
-    static CDCPair *pair;
+    CDCPair *pair;
 
     pair = iniGetCDCPair(pContext);
     if (pair == NULL)
@@ -1425,7 +1519,7 @@ static AnnotationEntry *iniGetAnnotations(IniContext *pContext)
 
 static SetDirectiveVars *iniAllocVars(IniContext *pContext, const bool initVars)
 {
-    static CDCPair *pair;
+    CDCPair *pair;
     SetDirectiveVars *set;
 
     set = iniGetVars(pContext);
@@ -1441,12 +1535,9 @@ static SetDirectiveVars *iniAllocVars(IniContext *pContext, const bool initVars)
 
     if (initVars && set->vars == NULL)
     {
-        set->vars = (HashArray *)malloc(sizeof(HashArray));
+        set->vars = (HashArray *)fc_malloc(sizeof(HashArray));
         if (set->vars == NULL)
         {
-            logWarning("file: "__FILE__", line: %d, "
-                    "malloc %d bytes fail",
-                    __LINE__, (int)sizeof(HashArray));
             return NULL;
         }
         if (hash_init_ex(set->vars, simple_hash, 17, 0.75, 0, true) != 0)
@@ -1467,60 +1558,73 @@ static void iniFreeDynamicContent(IniContext *pContext)
     DynamicAnnotations *pDynamicAnnotations;
     int i;
 
-    if (g_dynamic_content_count == 0)
+    if (checkInitDynamicContentArray() != 0)
     {
         return;
     }
 
-    if (g_dynamic_contents[g_dynamic_content_index].context == pContext)
+    pthread_mutex_lock(&g_dynamic_content_array.lock);
+    do
     {
-        pCDCPair = g_dynamic_contents + g_dynamic_content_index;
-    }
-    else
-    {
-        pCDCPair = NULL;
-        for (i=0; i<_MAX_DYNAMIC_CONTENTS; i++)
+        if (g_dynamic_content_array.count == 0)
         {
-            if (g_dynamic_contents[i].context == pContext)
+            break;
+        }
+
+        if (g_dynamic_content_array.contents[g_dynamic_content_array.index].
+                context == pContext)
+        {
+            pCDCPair = g_dynamic_content_array.contents +
+                g_dynamic_content_array.index;
+        }
+        else
+        {
+            pCDCPair = NULL;
+            for (i=0; i<g_dynamic_content_array.alloc; i++)
             {
-                pCDCPair = g_dynamic_contents + i;
+                if (g_dynamic_content_array.contents[i].context == pContext)
+                {
+                    pCDCPair = g_dynamic_content_array.contents + i;
+                    break;
+                }
+            }
+            if (pCDCPair == NULL)
+            {
                 break;
             }
         }
-        if (pCDCPair == NULL)
-        {
-            return;
-        }
-    }
 
-    pDynamicContents = &pCDCPair->dynamicContents;
-    if (pDynamicContents->contents != NULL)
-    {
-        for (i=0; i<pDynamicContents->count; i++)
+        pDynamicContents = &pCDCPair->dynamicContents;
+        if (pDynamicContents->contents != NULL)
         {
-            if (pDynamicContents->contents[i] != NULL)
+            for (i=0; i<pDynamicContents->count; i++)
             {
-                free(pDynamicContents->contents[i]);
+                if (pDynamicContents->contents[i] != NULL)
+                {
+                    free(pDynamicContents->contents[i]);
+                }
             }
+            free(pDynamicContents->contents);
+            pDynamicContents->contents = NULL;
+            pDynamicContents->alloc = 0;
+            pDynamicContents->count = 0;
         }
-        free(pDynamicContents->contents);
-        pDynamicContents->contents = NULL;
-        pDynamicContents->alloc_count = 0;
-        pDynamicContents->count = 0;
-    }
 
-    pDynamicAnnotations = &pCDCPair->dynamicAnnotations;
-    if (pDynamicAnnotations->annotations != NULL)
-    {
-        free(pDynamicAnnotations->annotations);
-        pDynamicAnnotations->annotations = NULL;
-        pDynamicAnnotations->alloc_count = 0;
-        pDynamicAnnotations->count = 0;
-    }
+        pDynamicAnnotations = &pCDCPair->dynamicAnnotations;
+        if (pDynamicAnnotations->annotations != NULL)
+        {
+            free(pDynamicAnnotations->annotations);
+            pDynamicAnnotations->annotations = NULL;
+            pDynamicAnnotations->alloc = 0;
+            pDynamicAnnotations->count = 0;
+        }
 
-    pCDCPair->used = false;
-    pCDCPair->context = NULL;
-    g_dynamic_content_count--;
+        pCDCPair->used = false;
+        pCDCPair->context = NULL;
+        g_dynamic_content_array.count--;
+    } while (0);
+
+    pthread_mutex_unlock(&g_dynamic_content_array.lock);
 }
 
 static char *iniAllocContent(IniContext *pContext, const int content_len)
@@ -1534,25 +1638,23 @@ static char *iniAllocContent(IniContext *pContext, const int content_len)
                 "malloc dynamic contents fail", __LINE__);
         return NULL;
     }
-    if (pDynamicContents->count >= pDynamicContents->alloc_count)
+    if (pDynamicContents->count >= pDynamicContents->alloc)
     {
-        int alloc_count;
+        int alloc;
         int bytes;
         char **contents;
-        if (pDynamicContents->alloc_count == 0)
+        if (pDynamicContents->alloc == 0)
         {
-            alloc_count = 8;
+            alloc = 8;
         }
         else
         {
-            alloc_count = pDynamicContents->alloc_count * 2;
+            alloc = pDynamicContents->alloc * 2;
         }
-        bytes = sizeof(char *) * alloc_count;
-        contents = (char **)malloc(bytes);
+        bytes = sizeof(char *) * alloc;
+        contents = (char **)fc_malloc(bytes);
         if (contents == NULL)
         {
-            logError("file: "__FILE__", line: %d, "
-                    "malloc %d bytes fail", __LINE__, bytes);
             return NULL;
         }
         memset(contents, 0, bytes);
@@ -1563,14 +1665,12 @@ static char *iniAllocContent(IniContext *pContext, const int content_len)
             free(pDynamicContents->contents);
         }
         pDynamicContents->contents = contents;
-        pDynamicContents->alloc_count = alloc_count;
+        pDynamicContents->alloc = alloc;
     }
 
-    buff = malloc(content_len);
+    buff = fc_malloc(content_len);
     if (buff == NULL)
     {
-        logError("file: "__FILE__", line: %d, "
-                "malloc %d bytes fail", __LINE__, content_len);
         return NULL;
     }
     pDynamicContents->contents[pDynamicContents->count++] = buff;
@@ -1580,34 +1680,32 @@ static char *iniAllocContent(IniContext *pContext, const int content_len)
 static int iniCheckAllocAnnotations(DynamicAnnotations *pDynamicAnnotations,
         const int annotation_count)
 {
-    int alloc_count;
+    int alloc;
     int bytes;
     AnnotationEntry *annotations;
 
     if (pDynamicAnnotations->count + annotation_count <
-            pDynamicAnnotations->alloc_count)
+            pDynamicAnnotations->alloc)
     {
         return 0;
     }
 
-    if (pDynamicAnnotations->alloc_count == 0)
+    if (pDynamicAnnotations->alloc == 0)
     {
-        alloc_count = 8;
+        alloc = 8;
     }
     else
     {
-        alloc_count = pDynamicAnnotations->alloc_count * 2;
+        alloc = pDynamicAnnotations->alloc * 2;
     }
-    while (alloc_count <= pDynamicAnnotations->count + annotation_count)
+    while (alloc <= pDynamicAnnotations->count + annotation_count)
     {
-        alloc_count *= 2;
+        alloc *= 2;
     }
-    bytes = sizeof(AnnotationEntry) * alloc_count;
-    annotations = (AnnotationEntry *)malloc(bytes);
+    bytes = sizeof(AnnotationEntry) * alloc;
+    annotations = (AnnotationEntry *)fc_malloc(bytes);
     if (annotations == NULL)
     {
-        logError("file: "__FILE__", line: %d, "
-                "malloc %d bytes fail", __LINE__, bytes);
         return ENOMEM;
     }
     memset(annotations, 0, bytes);
@@ -1618,7 +1716,7 @@ static int iniCheckAllocAnnotations(DynamicAnnotations *pDynamicAnnotations,
         free(pDynamicAnnotations->annotations);
     }
     pDynamicAnnotations->annotations = annotations;
-    pDynamicAnnotations->alloc_count = alloc_count;
+    pDynamicAnnotations->alloc = alloc;
     return 0;
 }
 
@@ -2052,10 +2150,8 @@ static int iniDoProccessSet(char *pSet, char **ppSetEnd,
             if (new_value != value) {
                 free(new_value);
             }
-            new_value = strdup(output);
+            new_value = fc_strdup(output);
             if (new_value == NULL) {
-                logWarning("file: "__FILE__", line: %d, "
-                        "malloc %d bytes fail", __LINE__, value_len + 1);
                 new_value = value;
                 value_len = 0;
             }
@@ -2621,26 +2717,22 @@ static int iniLoadItemsFromBuffer(char *content, IniContext *pContext)
 static int remallocSection(IniSection *pSection, IniItem **pItem)
 {
     int bytes;
-    int result;
-    int alloc_count;
+    int alloc;
     IniItem *pNew;
 
-    if (pSection->alloc_count == 0)
+    if (pSection->alloc == 0)
     {
-        alloc_count = _INIT_ALLOC_ITEM_COUNT;
+        alloc = _INIT_ALLOC_ITEM_COUNT;
     }
     else
     {
-        alloc_count = pSection->alloc_count * 2;
+        alloc = pSection->alloc * 2;
     }
-    bytes = sizeof(IniItem) * alloc_count;
-    pNew = (IniItem *)malloc(bytes);
+    bytes = sizeof(IniItem) * alloc;
+    pNew = (IniItem *)fc_malloc(bytes);
     if (pNew == NULL)
     {
-        logError("file: "__FILE__", line: %d, " \
-            "malloc %d bytes fail", __LINE__, bytes);
-        result = errno != 0 ? errno : ENOMEM;
-        return result;
+        return ENOMEM;
     }
 
     if (pSection->count > 0)
@@ -2650,11 +2742,11 @@ static int remallocSection(IniSection *pSection, IniItem **pItem)
         free(pSection->items);
     }
 
-    pSection->alloc_count = alloc_count;
+    pSection->alloc = alloc;
     pSection->items = pNew;
     *pItem = pSection->items + pSection->count;
     memset(*pItem, 0, sizeof(IniItem) *
-        (pSection->alloc_count - pSection->count));
+        (pSection->alloc - pSection->count));
 
     return 0;
 }
@@ -2708,8 +2800,8 @@ void iniFreeContext(IniContext *pContext)
     iniFreeDynamicContent(pContext);
 }
 
-#define INI_FIND_ITEM(szSectionName, szItemName, pContext, pSection, \
-        targetItem, pItem, return_val) \
+#define INI_FIND_ITEM(szSectionName, szItemName, \
+        pContext, pSection, targetItem, pItem) \
 do { \
     if (szSectionName == NULL || *szSectionName == '\0') \
     { \
@@ -2721,13 +2813,15 @@ do { \
                 szSectionName, strlen(szSectionName)); \
         if (pSection == NULL) \
         { \
-            return return_val; \
+            pItem = NULL;  \
+            break; \
         } \
     } \
     \
     if (pSection->count <= 0) \
     { \
-        return return_val; \
+        pItem = NULL;  \
+        break;  \
     } \
     \
     snprintf(targetItem.name, sizeof(targetItem.name), "%s", szItemName); \
@@ -2736,8 +2830,8 @@ do { \
 } while (0)
 
 
-char *iniGetStrValue(const char *szSectionName, const char *szItemName, \
-		IniContext *pContext)
+char *iniGetStrValueEx(const char *szSectionName, const char *szItemName,
+		IniContext *pContext, const bool bRetryGlobal)
 {
 	IniItem targetItem;
 	IniSection *pSection;
@@ -2745,33 +2839,88 @@ char *iniGetStrValue(const char *szSectionName, const char *szItemName, \
 	IniItem *pItem;
 	IniItem *pItemEnd;
 
-	INI_FIND_ITEM(szSectionName, szItemName, pContext, pSection, \
-			targetItem, pFound, NULL);
+	INI_FIND_ITEM(szSectionName, szItemName, pContext,
+            pSection, targetItem, pFound);
 	if (pFound == NULL)
 	{
-		return NULL;
+        if (RETRY_FETCH_GLOBAL(szSectionName, bRetryGlobal))
+        {
+            szSectionName = NULL;
+            INI_FIND_ITEM(szSectionName, szItemName, pContext,
+                    pSection, targetItem, pFound);
+            if (pFound == NULL)
+            {
+                return NULL;
+            }
+        }
+        else
+        {
+            return NULL;
+        }
 	}
 
 	pItemEnd = pSection->items + pSection->count;
 	for (pItem=pFound+1; pItem<pItemEnd; pItem++)
-	{
-		if (strcmp(pItem->name, szItemName) != 0)
-		{
-			break;
-		}
-
-        pFound = pItem;
-	}
+    {
+        if (strcmp(pItem->name, szItemName) == 0)
+        {
+            pFound = pItem;
+        }
+        else
+        {
+            break;
+        }
+    }
 
     return pFound->value;
 }
 
-int64_t iniGetInt64Value(const char *szSectionName, const char *szItemName, \
-		IniContext *pContext, const int64_t nDefaultValue)
+#define INI_FILL_SECTION_PROMPT(prompt, size, section_name) \
+    do { \
+        if (section_name != NULL && *(section_name) != '\0') { \
+            snprintf(prompt, size, "section: %s, ", section_name); \
+        } else { \
+            *prompt = '\0'; \
+        } \
+    } while (0)
+
+int64_t iniCheckAndCorrectIntValue(IniFullContext *pIniContext,
+        const char *szItemName, const int64_t nValue,
+        const int64_t nMinValue, const int64_t nMaxValue)
+{
+    char section_prompt[128];
+    if (nValue < nMinValue) {
+        INI_FILL_SECTION_PROMPT(section_prompt, sizeof(section_prompt),
+                pIniContext->section_name);
+        logWarning("file: "__FILE__", line: %d, "
+                "config file: %s, %sitem name: %s, item value: %"PRId64
+                " < min value: %"PRId64", set to min value: %"PRId64,
+                __LINE__, pIniContext->filename, section_prompt, szItemName,
+                nValue, nMinValue, nMinValue);
+
+        return nMinValue;
+    } else if (nValue > nMaxValue) {
+        INI_FILL_SECTION_PROMPT(section_prompt, sizeof(section_prompt),
+                pIniContext->section_name);
+        logWarning("file: "__FILE__", line: %d, "
+                "config file: %s, %sitem name: %s, item value: %"PRId64
+                " > max value: %"PRId64", set to max value: %"PRId64,
+                __LINE__, pIniContext->filename, section_prompt, szItemName,
+                nValue, nMaxValue, nMaxValue);
+        return nMaxValue;
+    }
+
+    return nValue;
+}
+
+int64_t iniGetInt64ValueEx(const char *szSectionName,
+        const char *szItemName, IniContext *pContext,
+        const int64_t nDefaultValue, const bool bRetryGlobal)
 {
 	char *pValue;
 
-	pValue = iniGetStrValue(szSectionName, szItemName, pContext);
+	pValue = iniGetStrValueEx(szSectionName, szItemName,
+            pContext, bRetryGlobal);
 	if (pValue == NULL)
 	{
 		return nDefaultValue;
@@ -2782,28 +2931,94 @@ int64_t iniGetInt64Value(const char *szSectionName, const char *szItemName, \
 	}
 }
 
-int iniGetIntValue(const char *szSectionName, const char *szItemName, \
-		IniContext *pContext, const int nDefaultValue)
+int64_t iniGetInt64CorrectValueEx(IniFullContext *pIniContext,
+        const char *szItemName, const int64_t nDefaultValue,
+        const int64_t nMinValue, const int64_t nMaxValue,
+        const bool bRetryGlobal)
+{
+    int64_t value;
+
+    value = iniGetInt64ValueEx(pIniContext->section_name, szItemName,
+            pIniContext->context, nDefaultValue, bRetryGlobal);
+    return iniCheckAndCorrectIntValue(pIniContext, szItemName,
+            value, nMinValue, nMaxValue);
+}
+
+int64_t iniGetByteValueEx(const char *szSectionName,
+        const char *szItemName, IniContext *pContext,
+        const int64_t nDefaultValue, const int nDefaultUnitBytes,
+        const bool bRetryGlobal)
+{
+    char *pValue;
+    int64_t nValue;
+
+    pValue = iniGetStrValueEx(szSectionName,
+            szItemName, pContext, bRetryGlobal);
+    if (pValue == NULL)
+    {
+        return nDefaultValue;
+    }
+
+    if (parse_bytes(pValue, nDefaultUnitBytes, &nValue) != 0)
+    {
+        return nDefaultValue;
+    }
+
+    return nValue;
+}
+
+int64_t iniGetByteCorrectValueEx(IniFullContext *pIniContext,
+        const char *szItemName, const int64_t nDefaultValue,
+        const int nDefaultUnitBytes, const int64_t nMinValue,
+        const int64_t nMaxValue, const bool bRetryGlobal)
+{
+    int64_t nValue;
+
+    nValue = iniGetByteValueEx(pIniContext->section_name, szItemName,
+            pIniContext->context, nDefaultValue, nDefaultUnitBytes,
+            bRetryGlobal);
+    return iniCheckAndCorrectIntValue(pIniContext, szItemName,
+            nValue, nMinValue, nMaxValue);
+}
+
+int iniGetIntValueEx(const char *szSectionName,
+        const char *szItemName, IniContext *pContext,
+        const int nDefaultValue, const bool bRetryGlobal)
 {
 	char *pValue;
 
-	pValue = iniGetStrValue(szSectionName, szItemName, pContext);
+	pValue = iniGetStrValueEx(szSectionName, szItemName,
+            pContext, bRetryGlobal);
 	if (pValue == NULL)
-	{
-		return nDefaultValue;
-	}
+    {
+        return nDefaultValue;
+    }
 	else
 	{
 		return atoi(pValue);
 	}
 }
 
-double iniGetDoubleValue(const char *szSectionName, const char *szItemName, \
-		IniContext *pContext, const double dbDefaultValue)
+int iniGetIntCorrectValueEx(IniFullContext *pIniContext,
+        const char *szItemName, const int nDefaultValue,
+        const int nMinValue, const int nMaxValue, const bool bRetryGlobal)
+{
+    int value;
+
+    value = iniGetIntValueEx(pIniContext->section_name, szItemName,
+            pIniContext->context, nDefaultValue, bRetryGlobal);
+    return iniCheckAndCorrectIntValue(pIniContext, szItemName,
+            value, nMinValue, nMaxValue);
+}
+
+double iniGetDoubleValueEx(const char *szSectionName,
+        const char *szItemName, IniContext *pContext,
+        const double dbDefaultValue, const bool bRetryGlobal)
 {
 	char *pValue;
 
-	pValue = iniGetStrValue(szSectionName, szItemName, pContext);
+	pValue = iniGetStrValueEx(szSectionName, szItemName,
+            pContext, bRetryGlobal);
 	if (pValue == NULL)
 	{
 		return dbDefaultValue;
@@ -2814,12 +3029,14 @@ double iniGetDoubleValue(const char *szSectionName, const char *szItemName, \
 	}
 }
 
-bool iniGetBoolValue(const char *szSectionName, const char *szItemName, \
-		IniContext *pContext, const bool bDefaultValue)
+bool iniGetBoolValueEx(const char *szSectionName,
+        const char *szItemName, IniContext *pContext,
+        const bool bDefaultValue, const bool bRetryGlobal)
 {
 	char *pValue;
 
-	pValue = iniGetStrValue(szSectionName, szItemName, pContext);
+	pValue = iniGetStrValueEx(szSectionName, szItemName,
+            pContext, bRetryGlobal);
 	if (pValue == NULL)
 	{
 		return bDefaultValue;
@@ -2864,7 +3081,7 @@ int iniGetValues(const char *szSectionName, const char *szItemName, \
 	return count;
 }
 
-IniItem *iniGetValuesEx(const char *szSectionName, const char *szItemName, \
+IniItem *iniGetValuesEx(const char *szSectionName, const char *szItemName,
 		IniContext *pContext, int *nTargetCount)
 {
 	IniItem targetItem;
@@ -2875,8 +3092,8 @@ IniItem *iniGetValuesEx(const char *szSectionName, const char *szItemName, \
 	IniItem *pItemStart;
 
 	*nTargetCount = 0;
-	INI_FIND_ITEM(szSectionName, szItemName, pContext, pSection, \
-			targetItem, pFound, NULL);
+	INI_FIND_ITEM(szSectionName, szItemName, pContext,
+            pSection, targetItem, pFound);
 	if (pFound == NULL)
 	{
 		return NULL;
@@ -2968,16 +3185,18 @@ void iniPrintItems(IniContext *pContext)
 	hash_walk(&pContext->sections, iniPrintHashData, NULL);
 }
 
-struct section_walk_arg {
+struct section_name_walk_arg {
     IniSectionInfo *sections;
+    IniSectionNameFilterFunc filter_func;
+    void *args;
     int count;
     int size;
 };
 
-static int iniSectionWalkCallback(const int index, const HashData *data,
-        void *args)
+static int iniSectionNameWalkCallback(const int index,
+        const HashData *data, void *args)
 {
-    struct section_walk_arg *walk_arg;
+    struct section_name_walk_arg *walk_arg;
 	IniSection *pSection;
     char *section_name;
 	int section_len;
@@ -2988,7 +3207,13 @@ static int iniSectionWalkCallback(const int index, const HashData *data,
 		return 0;
 	}
 
-    walk_arg = (struct section_walk_arg *)args;
+    walk_arg = (struct section_name_walk_arg *)args;
+    if (walk_arg->filter_func != NULL && !walk_arg->
+            filter_func(data->key, data->key_len, walk_arg->args))
+    {
+		return 0;
+    }
+
     if (walk_arg->count >= walk_arg->size)
     {
         return ENOSPC;
@@ -3009,18 +3234,99 @@ static int iniSectionWalkCallback(const int index, const HashData *data,
     return 0;
 }
 
-int iniGetSectionNames(IniContext *pContext, IniSectionInfo *sections,
+int iniGetSectionNamesEx(IniContext *pContext, IniSectionNameFilterFunc
+        filter_func, void *args, IniSectionInfo *sections,
         const int max_size, int *nCount)
 {
-    struct section_walk_arg walk_arg;
+    struct section_name_walk_arg walk_arg;
     int result;
 
     walk_arg.sections = sections;
-    walk_arg.count = 0;
+    walk_arg.filter_func = filter_func;
+    walk_arg.args = args;
     walk_arg.size = max_size;
-	result = hash_walk(&pContext->sections, iniSectionWalkCallback, &walk_arg);
+    walk_arg.count = 0;
+	result = hash_walk(&pContext->sections, iniSectionNameWalkCallback,
+            &walk_arg);
     *nCount = walk_arg.count;
     return result;
+}
+
+int iniGetSectionNames(IniContext *pContext, IniSectionInfo *sections,
+        const int max_size, int *nCount)
+{
+    return iniGetSectionNamesEx(pContext, NULL, NULL,
+            sections, max_size, nCount);
+}
+
+static bool iniSectionNameFilterByPrefix(const char *section_name,
+        const int name_len, void *args)
+{
+    string_t *prefix;
+
+    prefix = (string_t *)args;
+    if (name_len < prefix->len) {
+        return false;
+    }
+    return memcmp(section_name, prefix->str, prefix->len) == 0;
+}
+
+int iniGetSectionNamesByPrefix(IniContext *pContext, const char *szPrefix,
+        IniSectionInfo *sections, const int max_size, int *nCount)
+{
+    string_t prefix;
+
+    FC_SET_STRING(prefix, (char *)szPrefix);
+    return iniGetSectionNamesEx(pContext, iniSectionNameFilterByPrefix,
+            &prefix, sections, max_size, nCount);
+}
+
+struct section_count_walk_arg {
+    IniSectionNameFilterFunc filter_func;
+    void *args;
+    int count;
+};
+
+static int iniSectionCountWalkCallback(const int index,
+        const HashData *data, void *args)
+{
+    struct section_count_walk_arg *walk_arg;
+	IniSection *pSection;
+
+	pSection = (IniSection *)data->value;
+	if (pSection == NULL)
+	{
+		return 0;
+	}
+
+    walk_arg = (struct section_count_walk_arg *)args;
+    if (walk_arg->filter_func == NULL || walk_arg->
+            filter_func(data->key, data->key_len, walk_arg->args))
+    {
+        walk_arg->count++;
+    }
+
+    return 0;
+}
+
+int iniGetSectionCountEx(IniContext *pContext, IniSectionNameFilterFunc
+        filter_func, void *args)
+{
+    struct section_count_walk_arg walk_arg;
+
+    walk_arg.filter_func = filter_func;
+    walk_arg.args = args;
+    walk_arg.count = 0;
+    hash_walk(&pContext->sections, iniSectionCountWalkCallback, &walk_arg);
+    return walk_arg.count;
+}
+
+int iniGetSectionCountByPrefix(IniContext *pContext, const char *szPrefix)
+{
+    string_t prefix;
+
+    FC_SET_STRING(prefix, (char *)szPrefix);
+    return iniGetSectionCountEx(pContext, iniSectionNameFilterByPrefix, &prefix);
 }
 
 IniItem *iniGetSectionItems(const char *szSectionName, IniContext *pContext,
@@ -3083,3 +3389,41 @@ char *iniGetRequiredStrValueEx(const char *szSectionName, const char *szItemName
     return value;
 }
 
+int iniGetPercentValueEx(IniFullContext *ini_ctx,
+        const char *item_name, double *item_value,
+        const double default_value, const bool retry_global)
+{
+    char *value;
+    char *last;
+
+    value = iniGetStrValueEx(ini_ctx->section_name, item_name,
+            ini_ctx->context, retry_global);
+    if (value == NULL || *value == '\0') {
+        *item_value = default_value;
+    } else {
+        double d;
+        char *endptr;
+
+        last = value + strlen(value) - 1;
+        if (*last != '%') {
+            logError("file: "__FILE__", line: %d, "
+                    "config file: %s, item: %s, value: %s "
+                    "is NOT a valid ratio, expect end char: %%",
+                    __LINE__, ini_ctx->filename, item_name, value);
+            return EINVAL;
+        }
+
+        d = strtod(value, &endptr);
+        if ((endptr != last) || (d <= 0.00001 || d >= 100.00001)) {
+            logError("file: "__FILE__", line: %d, "
+                    "config file: %s, item: %s, "
+                    "value: %s is NOT a valid ratio",
+                    __LINE__, ini_ctx->filename, item_name, value);
+            return EINVAL;
+        }
+
+        *item_value = d / 100.00;
+    }
+
+    return 0;
+}

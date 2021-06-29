@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2020 YuQing <384681@qq.com>
+ *
+ * This program is free software: you can use, redistribute, and/or modify
+ * it under the terms of the Lesser GNU General Public License, version 3
+ * or later ("LGPL"), as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * You should have received a copy of the Lesser GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 //fast_mpool.c
 
 #include <errno.h>
@@ -44,14 +59,10 @@ static int fast_mpool_prealloc(struct fast_mpool_man *mpool,
     int bytes;
 
     bytes = sizeof(struct fast_mpool_malloc) + alloc_size;
-	pMallocNode = (struct fast_mpool_malloc *)malloc(bytes);
+	pMallocNode = (struct fast_mpool_malloc *)fc_malloc(bytes);
 	if (pMallocNode == NULL)
 	{
-		logError("file: "__FILE__", line: %d, " \
-			"malloc %d bytes fail, " \
-			"errno: %d, error info: %s", \
-			__LINE__, bytes, errno, STRERROR(errno));
-		return errno != 0 ? errno : ENOMEM;
+		return ENOMEM;
 	}
 
     pMallocNode->alloc_size = alloc_size;
@@ -165,22 +176,22 @@ void *fast_mpool_alloc(struct fast_mpool_man *mpool, const int size)
 	return NULL;
 }
 
-int fast_mpool_strdup_ex(struct fast_mpool_man *mpool, string_t *dest,
-        const char *src, const int len)
+void *fast_mpool_memdup(struct fast_mpool_man *mpool,
+        const void *src, const int len)
 {
-    dest->str = (char *)fast_mpool_alloc(mpool, len);
-    if (dest->str == NULL)
+    void *dest;
+    dest = (char *)fast_mpool_alloc(mpool, len);
+    if (dest == NULL)
     {
         logError("file: "__FILE__", line: %d, "
                 "alloc %d bytes from mpool fail", __LINE__, len);
-        return ENOMEM;
+        return NULL;
     }
 
     if (len > 0) {
-        memcpy(dest->str, src, len);
+        memcpy(dest, src, len);
     }
-    dest->len = len;
-    return 0;
+    return dest;
 }
 
 void fast_mpool_reset(struct fast_mpool_man *mpool)
@@ -200,7 +211,8 @@ void fast_mpool_reset(struct fast_mpool_man *mpool)
 	}
 }
 
-void fast_mpool_stats(struct fast_mpool_man *mpool, struct fast_mpool_stats *stats)
+void fast_mpool_stats(struct fast_mpool_man *mpool,
+        struct fast_mpool_stats *stats)
 {
 	struct fast_mpool_malloc *pMallocNode;
 
@@ -213,7 +225,8 @@ void fast_mpool_stats(struct fast_mpool_man *mpool, struct fast_mpool_stats *sta
 	while (pMallocNode != NULL)
 	{
         stats->total_bytes += pMallocNode->alloc_size;
-        stats->free_bytes += (int)(pMallocNode->end_ptr - pMallocNode->free_ptr);
+        stats->free_bytes += (int)(pMallocNode->end_ptr -
+                pMallocNode->free_ptr);
         stats->total_trunk_count++;
 
 		pMallocNode = pMallocNode->malloc_next;
@@ -227,3 +240,15 @@ void fast_mpool_stats(struct fast_mpool_man *mpool, struct fast_mpool_stats *sta
 	}
 }
 
+void fast_mpool_log_stats(struct fast_mpool_man *mpool)
+{
+    struct fast_mpool_stats stats;
+
+    fast_mpool_stats(mpool, &stats);
+    logInfo("alloc_size_once: %d, discard_size: %d, "
+            "bytes: {total: %"PRId64", free: %"PRId64"}, "
+            "trunk_count: {total: %d, free: %d}",
+            mpool->alloc_size_once, mpool->discard_size,
+            stats.total_bytes, stats.free_bytes,
+            stats.total_trunk_count, stats.free_trunk_count);
+}
